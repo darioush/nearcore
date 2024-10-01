@@ -581,8 +581,16 @@ impl Verifier<ed25519::Signature> for VerifyingKey {
     /// # Return
     ///
     /// Returns `Ok(())` if the signature is valid, and `Err` otherwise.
+    /// Uncomment the following 3 lines if the older (slightly unsafe version is needed)
+
+    // fn verify(&self, message: &[u8], signature: &ed25519::Signature) -> Result<(), SignatureError> {
+    //     self.raw_verify::<Sha512>(message, signature)
+    // }
+
+    /// A safer verification of the above following NIST  IR 8214B ipd specification and [SSR:CGN20]
+    /// Better using this function to prevent any kinds of attacks and `verification inconsistencies with batch verification`.
     fn verify(&self, message: &[u8], signature: &ed25519::Signature) -> Result<(), SignatureError> {
-        self.raw_verify::<Sha512>(message, signature)
+        self.safe_verify::<Sha512>(message,signature)
     }
 }
 
