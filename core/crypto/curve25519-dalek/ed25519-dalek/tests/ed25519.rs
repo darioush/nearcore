@@ -226,8 +226,8 @@ mod vectors {
         let signature = serialize_signature(&r, &s);
         let vk = VerifyingKey::from_bytes(pubkey.compress().as_bytes()).unwrap();
         let sig = Signature::try_from(&signature[..]).unwrap();
-        assert!(vk.verify(message1, &sig).is_ok());
-        assert!(vk.verify(message2, &sig).is_ok());
+        assert!(vk.raw_verify::<Sha512>(message1, &sig).is_ok());
+        assert!(vk.raw_verify::<Sha512>(message2, &sig).is_ok());
 
         // Check that this public key appears as weak
         assert!(vk.is_weak());
@@ -239,8 +239,8 @@ mod vectors {
 
         // Now check that the sigs fail under safe_verify. This is because safe_verify rejects
         // small order pubkeys.
-        assert!(vk.safe_verify::<Sha512>(message1, &sig).is_err());
-        assert!(vk.safe_verify::<Sha512>(message2, &sig).is_err());
+        assert!(vk.verify(message1, &sig).is_err());
+        assert!(vk.verify(message2, &sig).is_err());
     }
 
     // Identical to repudiation() above, but testing verify_prehashed against

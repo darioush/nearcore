@@ -243,7 +243,7 @@ impl VerifyingKey {
     /// This definition is loose in its parameters so that end-users of the `hazmat` module can
     /// change how the `ExpandedSecretKey` is calculated and which hash function to use.
     #[allow(non_snake_case)]
-    pub(crate) fn raw_verify<CtxDigest>(
+    pub fn raw_verify<CtxDigest>(
         &self,
         message: &[u8],
         signature: &ed25519::Signature,
@@ -302,7 +302,7 @@ impl VerifyingKey {
             .R
             .decompress()
             .ok_or_else(|| SignatureError::from(InternalError::Verify))?;
-        if signature_R.is_small_order() || self.point.is_small_order() {
+        if signature_R.is_small_order() || self.is_weak() {
             return Err(InternalError::Verify.into());
         }
 

@@ -325,7 +325,7 @@ pub fn safe_verify_batch(
             .decompress()
             .ok_or_else(|| SignatureError::from(InternalError::Verify))?;
         // check public key is not of low order
-        if signature_R.is_small_order() || verifying_keys[i].point.is_small_order() {
+        if signature_R.is_small_order() || verifying_keys[i].is_weak() {
             // for an extra optimization comment out the previous line and uncomment the next line
             // CAREFUL: do not use this optimization unless you have already verified the verification key well-formdness earlier
             // (when published on the chain)
