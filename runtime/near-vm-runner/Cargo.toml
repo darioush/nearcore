@@ -49,6 +49,7 @@ near-primitives-core.workspace = true
 near-schema-checker-lib.workspace = true
 
 bytesize.workspace = true
+ed25519-dalek = { version = "2.1.1", path = "../../core/crypto/curve25519-dalek/ed25519-dalek", features = ["hazmat"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 near-vm-compiler = { workspace = true, optional = true }

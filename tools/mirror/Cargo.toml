@@ -50,6 +50,7 @@ near-primitives-core.workspace = true
 near-o11y.workspace = true
 near-store.workspace = true
 near-crypto.workspace = true
+ed25519-dalek = { version = "2.1.1", path = "../../core/crypto/curve25519-dalek/ed25519-dalek", features = ["hazmat"] }
 
 [features]
 nightly = [
