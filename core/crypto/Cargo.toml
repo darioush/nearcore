@@ -15,9 +15,9 @@ workspace = true
 blake2.workspace = true
 borsh.workspace = true
 bs58.workspace = true
-curve25519-dalek = { version = "4.1.3", path = "curve25519-dalek/curve25519-dalek", features = ["precomputed-tables", "alloc"] }
+curve25519-dalek = { path = "curve25519-dalek/curve25519-dalek", features = ["precomputed-tables", "alloc"] }
 derive_more = { workspace = true, features = ["as_ref", "from", "into"] }
-ed25519-dalek = { version = "2.1.1", path = "curve25519-dalek/ed25519-dalek", features = ["hazmat"] }
+ed25519-dalek = { path = "curve25519-dalek/ed25519-dalek", features = ["hazmat", "batch"] }
 hex.workspace = true
 near-account-id.workspace = true
 primitive-types.workspace = true
@@ -37,7 +37,7 @@ bolero.workspace = true
 hex-literal.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-curve25519-dalek = { version = "4.1.3", path = "curve25519-dalek/curve25519-dalek", features = ["rand_core"] }
+curve25519-dalek = { path = "curve25519-dalek/curve25519-dalek", features = ["rand_core"] }
 
 [features]
 default = ["rand"]
