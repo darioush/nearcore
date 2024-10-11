@@ -1,7 +1,7 @@
 use near_schema_checker_lib::ProtocolSchema;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use ed25519_dalek::ed25519::signature::{Signer, Verifier};
+use ed25519_dalek::{Signer, Verifier};
 use primitive_types::U256;
 use secp256k1::Message;
 use std::convert::AsRef;
@@ -603,6 +603,44 @@ impl Signature {
             Signature::ED25519(_) => KeyType::ED25519,
             Signature::SECP256K1(_) => KeyType::SECP256K1,
         }
+    }
+
+    /// Verifies a batch of ed25519 messages/signatures.
+    /// Expects lists of inputs of the same size.
+    /// If inconsistencies were found or errors were raised, then output false.
+    pub fn verify_batch(signatures: Vec<&Self>, data_list: Vec<&[u8]>, public_keys: Vec<&PublicKey>) -> bool {
+        // check that all the arrays have the same lengths
+        if signatures.len() != data_list.len() || data_list.len() != public_keys.len(){
+            return false;
+        }
+
+        // verify the types of keys belonging to Ed25519
+        // and construct ed25519_dalek verification keys
+        let mut verifying_keys: Vec<ed25519_dalek::VerifyingKey> = Vec::new();
+        for &pk in public_keys.iter(){
+            if let PublicKey::ED25519(public_key) = pk {
+                match ed25519_dalek::VerifyingKey::from_bytes(&public_key.0) {
+                    Ok(vk) => verifying_keys.push(vk),
+                    Err(_) => return false,
+                }
+            }
+            else {
+                return false;
+            }
+        };
+
+        // verify the types of signatures belonging to Ed25519 and unwrap them
+        let mut ed25519_signatures: Vec<&ed25519_dalek::Signature> = Vec::new();
+        for &sig in signatures.iter(){
+            if let Signature::ED25519(signature) = sig {
+                ed25519_signatures.push(signature);
+            }
+            else {
+                return false;
+            }
+        };
+        // verify the batch of signatures
+        ed25519_dalek::safe_verify_batch(&data_list[..], &ed25519_signatures[..], &verifying_keys[..]).is_ok()
     }
 }
 
