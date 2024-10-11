@@ -132,6 +132,7 @@ fn gen_u128<R: RngCore>(rng: &mut R) -> u128 {
 /// assert!(result.is_ok());
 /// # }
 /// ```
+#[deprecated(note="This function should not be used as it might introduce verification inconsistencies in the presence of malicious signer.")]
 #[allow(non_snake_case)]
 pub fn verify_batch(
     messages: &[&[u8]],
@@ -245,7 +246,7 @@ pub fn verify_batch(
 #[allow(non_snake_case)]
 pub fn safe_verify_batch(
     messages: &[&[u8]],
-    signatures: &[ed25519::Signature],
+    signatures: &[&ed25519::Signature],
     verifying_keys: &[VerifyingKey],
 ) -> Result<(), SignatureError> {
     // Return an Error if any of the vectors were not the same size as the others.
@@ -301,11 +302,11 @@ pub fn safe_verify_batch(
     // randomness for the batch verification.
     let mut rng = transcript.build_rng().finalize(&mut ZeroRng);
 
+    let mut internal_signatures: Vec<InternalSignature> = Vec::new();
     // Convert all signatures to `InternalSignature`
-    let signatures = signatures
-        .iter()
-        .map(InternalSignature::try_from)
-        .collect::<Result<Vec<_>, _>>()?;
+    for &signature in signatures.iter(){
+        internal_signatures.push(InternalSignature::try_from(signature)?);
+    };
 
     // perform extra checks as safe_verify
     // these checks are performed at this point (not earlier) for efficiency
@@ -315,12 +316,12 @@ pub fn safe_verify_batch(
         // non-optimized version implemented: lexicographic check
         // optimized version [SSR:CGN20, Sec. 4] rejects a specific authentic
         // signature (honestly generated with probability 1/2^128)
-        if signatures[i].s >= curve25519_dalek::constants::BASEPOINT_ORDER {
+        if internal_signatures[i].s >= curve25519_dalek::constants::BASEPOINT_ORDER {
             return Err(InternalError::Verify.into());
         };
 
         // not too efficient decompression as this is called twice in this function
-        let signature_R = signatures[i]
+        let signature_R = internal_signatures[i]
             .R
             .decompress()
             .ok_or_else(|| SignatureError::from(InternalError::Verify))?;
@@ -334,7 +335,7 @@ pub fn safe_verify_batch(
             return Err(InternalError::Verify.into());
         }
         // check canonicity of R and A
-        if !signatures[i].R.is_canonical_y() || !verifying_keys[i].compressed.is_canonical_y() {
+        if !internal_signatures[i].R.is_canonical_y() || !verifying_keys[i].compressed.is_canonical_y() {
             // for an extra optimization comment out the previous line and uncomment the next line
             // CAREFUL: do not use this optimization unless you have already verified the verification key well-formdness earlier
             // (when published on the chain)
@@ -356,7 +357,7 @@ pub fn safe_verify_batch(
         .collect();
 
     // Compute the basepoint coefficient, ∑ s[i]z[i] (mod l)
-    let B_coefficient: Scalar = signatures
+    let B_coefficient: Scalar = internal_signatures
         .iter()
         .map(|sig| sig.s)
         .zip(zs.iter())
@@ -366,7 +367,7 @@ pub fn safe_verify_batch(
     // Multiply each H(R || A || M) by the random value
     let zhrams = hrams.iter().zip(zs.iter()).map(|(hram, z)| hram * z);
 
-    let Rs = signatures.iter().map(|sig| sig.R.decompress());
+    let Rs = internal_signatures.iter().map(|sig| sig.R.decompress());
     let As = verifying_keys.iter().map(|pk| Some(pk.point));
     let B = once(Some(constants::ED25519_BASEPOINT_POINT));
 

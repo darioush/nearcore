@@ -523,17 +523,16 @@ mod integrations {
             b"Hey, I never cared about your bucks, so if I run up with a mask on, probably got a gas can too.",
             b"And I'm not here to fill 'er up. Nope, we came to riot, here to incite, we don't want any of your stuff.", ];
         let mut csprng = OsRng;
-        let mut signing_keys: Vec<SigningKey> = Vec::new();
+        let mut verifying_keys: Vec<VerifyingKey> = Vec::new();
         let mut signatures: Vec<Signature> = Vec::new();
 
         for msg in messages {
             let signing_key: SigningKey = SigningKey::generate(&mut csprng);
             signatures.push(signing_key.sign(msg));
-            signing_keys.push(signing_key);
+            verifying_keys.push(signing_key.verifying_key());
         }
-        let verifying_keys: Vec<VerifyingKey> =
-            signing_keys.iter().map(|key| key.verifying_key()).collect();
 
+        let signatures: Vec<&Signature> = signatures.iter().collect();
         let result = safe_verify_batch(&messages, &signatures, &verifying_keys);
 
         assert!(result.is_ok());
@@ -606,7 +605,8 @@ mod integrations {
             signatures.push(Signature::from_slice(&signature).unwrap());
             messages.push(message);
 
-            let b = safe_verify_batch(&messages, &signatures, &verifying_keys);
+            let signature_list: Vec<&Signature> = signatures.iter().collect();
+            let b = safe_verify_batch(&messages, &signature_list, &verifying_keys);
             // Follow the first line of table 5 of [SSR:CGN20] with the exception that we reject
             // low order commitment R (based on the NIST note)
             if i < 3 || i > 5 {
