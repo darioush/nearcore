@@ -275,6 +275,10 @@ pub enum InvalidTxError {
         /// The number of blocks since the last included chunk of the shard.
         missed_chunks: u64,
     } = 17,
+
+    // ADDED HERE
+    /// The transaction batch is incoherent in sizes
+    IncoherentBatchTxsSizes = 18,
 }
 
 impl From<StorageError> for InvalidTxError {
@@ -767,6 +771,9 @@ impl Display for InvalidTxError {
                     f,
                     "Shard {shard_id} missed {missed_chunks} chunks and rejects new transactions."
                 )
+            }
+            InvalidTxError::IncoherentBatchTxsSizes => {
+                write!(f, "A batch of transactions was rejected due to incompatible input sizes.")
             }
         }
     }
