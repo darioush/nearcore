@@ -609,10 +609,7 @@ impl Signature {
     /// Expects lists of inputs of the same size.
     /// If inconsistencies were found or errors were raised, then output false.
     pub fn verify_batch(signatures: Vec<&Self>, data_list: Vec<&[u8]>, public_keys: Vec<&PublicKey>) -> bool {
-        // check that all the arrays have the same lengths
-        if signatures.len() != data_list.len() || data_list.len() != public_keys.len(){
-            return false;
-        }
+
 
         // verify the types of keys belonging to Ed25519
         // and construct ed25519_dalek verification keys
@@ -639,7 +636,9 @@ impl Signature {
                 return false;
             }
         };
+
         // verify the batch of signatures
+        // will internally check that all the arrays have the same lengths
         ed25519_dalek::safe_verify_batch(&data_list[..], &ed25519_signatures[..], &verifying_keys[..]).is_ok()
     }
 }
