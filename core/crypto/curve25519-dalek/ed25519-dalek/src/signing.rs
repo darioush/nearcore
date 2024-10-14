@@ -412,6 +412,16 @@ impl SigningKey {
             .verify_prehashed(prehashed_message, context, signature)
     }
 
+
+
+    /// verifies a signature in a not fully secure manner
+    /// This function is not meant to be used, it exists only for legacy compatibility.
+    #[allow(non_snake_case)]
+    pub fn raw_verify(&self, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
+        self.verifying_key
+            .raw_verify::<sha2::Sha512>(message, signature)
+    }
+
     /// Strictly verify a signature on a message with this signing key's public key.
     ///
     /// # On The (Multiple) Sources of Malleability in Ed25519 Signatures

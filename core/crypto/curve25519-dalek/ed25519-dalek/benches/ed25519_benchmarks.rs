@@ -31,8 +31,8 @@ mod ed25519_benches {
         let msg: &[u8] = b"";
         let sig: Signature = keypair.sign(msg);
 
-        c.bench_function("Ed25519 signature verification", move |b| {
-            b.iter(|| keypair.verify(msg, &sig))
+        c.bench_function("Ed25519 signature unsafe verification", move |b| {
+            b.iter(|| keypair.raw_verify(msg, &sig))
         });
     }
 
@@ -54,7 +54,7 @@ mod ed25519_benches {
         let sig: Signature = keypair.sign(msg);
 
         c.bench_function("Ed25519 safe signature verification", move |b| {
-            b.iter(|| keypair.safe_verify(msg, &sig))
+            b.iter(|| keypair.verify(msg, &sig))
         });
     }
 
