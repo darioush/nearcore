@@ -25,7 +25,7 @@ mod ed25519_benches {
         c.bench_function("Ed25519 signing", move |b| b.iter(|| keypair.sign(msg)));
     }
 
-    fn verify(c: &mut Criterion) {
+    fn unsafe_verify(c: &mut Criterion) {
         let mut csprng: ThreadRng = thread_rng();
         let keypair: SigningKey = SigningKey::generate(&mut csprng);
         let msg: &[u8] = b"";
@@ -88,7 +88,8 @@ mod ed25519_benches {
     fn safe_verify_batch_signatures(c: &mut Criterion) {
         use ed25519_dalek::safe_verify_batch;
 
-        static BATCH_SIZES: [usize; 9] = [4, 8, 16, 32, 64, 96, 128, 256, 1024];
+        // static BATCH_SIZES: [usize; 9] = [4, 8, 16, 32, 64, 96, 128, 256, 1024];
+        static BATCH_SIZES: [usize; 3] = [128, 256, 1024];
 
         // Benchmark batch verification for all the above batch sizes
         let mut group = c.benchmark_group("Ed25519 safe batch signature verification");
@@ -132,12 +133,12 @@ mod ed25519_benches {
         config = Criterion::default();
         targets =
             sign,
-            verify,
-            verify_strict,
-            safe_verify,
-            verify_batch_signatures,
+            unsafe_verify,
+            // verify_strict,
+            // safe_verify,
+            // verify_batch_signatures,
             safe_verify_batch_signatures,
-            key_generation,
+            // key_generation,
     }
 }
 
