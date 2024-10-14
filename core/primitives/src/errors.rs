@@ -276,7 +276,6 @@ pub enum InvalidTxError {
         missed_chunks: u64,
     } = 17,
 
-    // ADDED HERE
     /// The transaction batch is incoherent in sizes
     IncoherentBatchTxsSizes = 18,
 }
