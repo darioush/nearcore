@@ -135,7 +135,7 @@ pub fn validate_chunk_with_chunk_extra_and_receipts_root(
 
     validate_congestion_info(prev_chunk_extra.congestion_info(), chunk_header.congestion_info())?;
     validate_bandwidth_requests(
-        prev_chunk_extra.bandwidth_requests(),
+        &prev_chunk_extra.bandwidth_requests(),
         chunk_header.bandwidth_requests(),
     )?;
 
@@ -161,25 +161,25 @@ fn validate_congestion_info(
 }
 
 fn validate_bandwidth_requests(
-    extra_bandwidth_requests: Option<&BandwidthRequests>,
+    extra_bandwidth_requests: &BandwidthRequests,
     header_bandwidth_requests: Option<&BandwidthRequests>,
 ) -> Result<(), Error> {
-    if extra_bandwidth_requests != header_bandwidth_requests {
-        fn requests_len(requests_opt: Option<&BandwidthRequests>) -> usize {
-            match requests_opt {
-                Some(BandwidthRequests::V1(requests_v1)) => requests_v1.requests.len(),
-                None => 0,
-            }
+    if let Some(header_bandwidth_requests) = header_bandwidth_requests {
+        if extra_bandwidth_requests == header_bandwidth_requests {
+            return Ok(());
+        }
+        fn requests_len(BandwidthRequests::V1(requests_v1): &BandwidthRequests) -> usize {
+            requests_v1.requests.len()
         }
         let error_info_str = format!(
-            "chunk extra: (is_some: {}, len: {}) chunk header: (is_some: {}, len: {})",
-            extra_bandwidth_requests.is_some(),
+            "chunk extra: (len: {}) chunk header: (len: {})",
             requests_len(extra_bandwidth_requests),
-            header_bandwidth_requests.is_some(),
             requests_len(header_bandwidth_requests)
         );
         return Err(Error::InvalidBandwidthRequests(error_info_str));
+    } else {
+        return Err(Error::InvalidBandwidthRequests(
+            "chunk header bandwidth requests is None".to_string(),
+        ));
     }
-
-    Ok(())
 }

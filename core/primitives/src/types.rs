@@ -937,10 +937,10 @@ pub mod chunk_extra {
         }
 
         #[inline]
-        pub fn bandwidth_requests(&self) -> Option<&BandwidthRequests> {
+        pub fn bandwidth_requests(&self) -> BandwidthRequests {
             match self {
-                Self::V1(_) | Self::V2(_) | Self::V3(_) => None,
-                Self::V4(extra) => Some(&extra.bandwidth_requests),
+                Self::V1(_) | Self::V2(_) | Self::V3(_) => BandwidthRequests::empty(),
+                Self::V4(extra) => extra.bandwidth_requests.clone(),
             }
         }
     }

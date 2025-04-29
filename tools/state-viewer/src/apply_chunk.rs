@@ -136,9 +136,7 @@ pub fn apply_chunk(
         let Ok(chunk_extra) = chain_store.get_chunk_extra(&prev_block_hash, &shard_uid) else {
             continue;
         };
-        if let Some(bandwidth_requests) = chunk_extra.bandwidth_requests() {
-            shards_bandwidth_requests.insert(shard_id, bandwidth_requests.clone());
-        }
+        shards_bandwidth_requests.insert(shard_id, chunk_extra.bandwidth_requests());
         shards_congestion_info.insert(
             shard_id,
             near_primitives::congestion_info::ExtendedCongestionInfo {

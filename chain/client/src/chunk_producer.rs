@@ -13,7 +13,6 @@ use near_client_primitives::debug::ChunkProduction;
 use near_client_primitives::types::Error;
 use near_epoch_manager::EpochManagerAdapter;
 use near_epoch_manager::shard_assignment::shard_id_to_uid;
-use near_primitives::bandwidth_scheduler::BandwidthRequests;
 use near_primitives::epoch_info::RngSeed;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{MerklePath, merklize};
@@ -286,10 +285,6 @@ impl ChunkProducer {
 
         let congestion_info = chunk_extra.congestion_info();
         let bandwidth_requests = chunk_extra.bandwidth_requests();
-        debug_assert!(
-            bandwidth_requests.is_some(),
-            "Expected bandwidth_request to be Some after BandwidthScheduler feature enabled"
-        );
         let (encoded_chunk, merkle_paths, outgoing_receipts) =
             ShardsManagerActor::create_encoded_shard_chunk(
                 prev_block_hash,
@@ -306,7 +301,7 @@ impl ChunkProducer {
                 outgoing_receipts_root,
                 tx_root,
                 congestion_info,
-                bandwidth_requests.cloned().unwrap_or_else(BandwidthRequests::empty),
+                bandwidth_requests,
                 &*validator_signer,
                 &mut self.reed_solomon_encoder,
             );
