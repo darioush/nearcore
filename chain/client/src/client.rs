@@ -1651,8 +1651,6 @@ impl Client {
     // Produce new chunks
     fn produce_chunks(&mut self, block: &Block, signer: &Arc<ValidatorSigner>) {
         let validator_id = signer.validator_id().clone();
-        let _timer =
-            metrics::CLIENT_PHASE_TIME.with_label_values(&["produce_chunks"]).start_timer();
         let _span = debug_span!(
             target: "client",
             "produce_chunks",

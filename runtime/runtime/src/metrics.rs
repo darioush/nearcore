@@ -57,15 +57,6 @@ pub static INCOMING_RECEIPT_PROCESSING_SECONDS_TOTAL: LazyLock<CounterVec> = Laz
     .unwrap()
 });
 
-pub static RUNTIME_PHASE_SECONDS_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "near_runtime_phase_seconds_total",
-        "The time spent in each phase of the runtime",
-        &["phase"],
-    )
-    .unwrap()
-});
-
 pub static DELAYED_RECEIPT_PROCESSED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     try_create_int_counter_vec(
         "near_delayed_receipt_processed_total",

@@ -1573,19 +1573,11 @@ impl Runtime {
         )?;
 
         // Step 2: process transactions.
-        let process_transactions_start = std::time::Instant::now();
         self.process_transactions(&mut processing_state, signed_txs, &mut receipt_sink)?;
-        metrics::RUNTIME_PHASE_SECONDS_TOTAL
-            .with_label_values(&["process_transactions"])
-            .inc_by(process_transactions_start.elapsed().as_secs_f64());
 
         // Step 3: process receipts.
-        let process_receipts_start = std::time::Instant::now();
         let process_receipts_result =
             self.process_receipts(&mut processing_state, &mut receipt_sink)?;
-        metrics::RUNTIME_PHASE_SECONDS_TOTAL
-            .with_label_values(&["process_receipts"])
-            .inc_by(process_receipts_start.elapsed().as_secs_f64());
 
         // After receipt processing is done, report metrics on outgoing buffers
         // and on congestion indicators.
@@ -1596,17 +1588,12 @@ impl Runtime {
         );
 
         // Step 4: validate and apply the state update.
-        let validate_apply_state_start = std::time::Instant::now();
-        let result = self.validate_apply_state_update(
+        self.validate_apply_state_update(
             processing_state,
             process_receipts_result,
             receipt_sink,
             state_patch,
-        );
-        metrics::RUNTIME_PHASE_SECONDS_TOTAL
-            .with_label_values(&["validate_apply_state_update"])
-            .inc_by(validate_apply_state_start.elapsed().as_secs_f64());
-        result
+        )
     }
 
     fn apply_state_patch(&self, state_update: &mut TrieUpdate, state_patch: SandboxStatePatch) {

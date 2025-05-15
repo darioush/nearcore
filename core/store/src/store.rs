@@ -6,10 +6,10 @@ use std::{fmt, io};
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_fmt::{AbbrBytes, StorageKey};
 
+use crate::DBCol;
 use crate::adapter::{StoreAdapter, StoreUpdateAdapter};
 use crate::db::metadata::{DbKind, DbMetadata, DbVersion, KIND_KEY, VERSION_KEY};
 use crate::db::{DBIterator, DBOp, DBSlice, DBTransaction, Database, StoreStatistics, refcount};
-use crate::{DBCol, metrics};
 
 const STATE_COLUMNS: [DBCol; 2] = [DBCol::State, DBCol::FlatState];
 const STATE_FILE_END_MARK: u8 = 255;
@@ -394,7 +394,6 @@ impl StoreUpdate {
         )
     )]
     pub fn commit(self) -> io::Result<()> {
-        let _timer = metrics::STORE_UPDATE_COMMIT_TIME.start_timer();
         debug_assert!(
             {
                 let non_refcount_keys = self

@@ -358,8 +358,6 @@ impl ChunkProducer {
         chunk_extra: &ChunkExtra,
         chain_validate: &dyn Fn(&SignedTransaction) -> bool,
     ) -> Result<PreparedTransactions, Error> {
-        let _timer =
-            metrics::CLIENT_DETAIL_TIME.with_label_values(&["prepare_transactions"]).start_timer();
         let shard_id = shard_uid.shard_id();
         let mut pool_guard = self.sharded_tx_pool.lock();
         let prepared_transactions = if let Some(mut iter) = pool_guard.get_pool_iterator(shard_uid)

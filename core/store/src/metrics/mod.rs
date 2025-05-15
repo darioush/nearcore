@@ -550,14 +550,6 @@ pub static COLD_STORE_MIGRATION_BATCH_WRITE_TIME: LazyLock<HistogramVec> = LazyL
     .unwrap()
 });
 
-pub static STORE_UPDATE_COMMIT_TIME: LazyLock<Histogram> = LazyLock::new(|| {
-    try_create_histogram(
-        "near_store_update_commit_time",
-        "Time spent on committing updates to the store",
-    )
-    .unwrap()
-});
-
 pub static TRIE_MEMORY_PARTIAL_STORAGE_MISSING_VALUES_COUNT: LazyLock<IntCounter> =
     LazyLock::new(|| {
         try_create_int_counter(

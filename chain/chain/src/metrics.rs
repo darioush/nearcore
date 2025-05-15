@@ -307,23 +307,3 @@ pub(crate) static STATE_TRANSITION_DATA_GC_TIME: LazyLock<Histogram> = LazyLock:
     )
     .unwrap()
 });
-
-pub(crate) static CHAIN_PHASE_TIME: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
-        "near_chain_phase_time",
-        "Time spent in each phase of the chain",
-        &["phase"],
-        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
-    )
-    .unwrap()
-});
-
-pub(crate) static CHAIN_DETAIL_TIME: LazyLock<HistogramVec> = LazyLock::new(|| {
-    try_create_histogram_vec(
-        "near_chain_detail_time",
-        "Time spent in each detailed phase of the chain",
-        &["phase"],
-        Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
-    )
-    .unwrap()
-});
