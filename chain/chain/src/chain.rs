@@ -1807,6 +1807,8 @@ impl Chain {
         block_processing_artifacts: &mut BlockProcessingArtifact,
         apply_chunks_done_sender: Option<near_async::messaging::Sender<ApplyChunksDoneMessage>>,
     ) -> Result<AcceptedBlock, Error> {
+        let _timer =
+            metrics::CHAIN_PHASE_TIME.with_label_values(&["postprocess_ready_block"]).start_timer();
         let timer = metrics::BLOCK_POSTPROCESSING_TIME.start_timer();
         let (block, block_preprocess_info) =
             self.blocks_in_processing.remove(&block_hash).unwrap_or_else(|| {
@@ -2211,6 +2213,8 @@ impl Chain {
         block_received_time: Instant,
         state_patch: SandboxStatePatch,
     ) -> Result<PreprocessBlockResult, Error> {
+        let _timer =
+            metrics::CHAIN_PHASE_TIME.with_label_values(&["preprocess_block"]).start_timer();
         let header = block.header();
 
         // see if the block is already in processing or if there are too many blocks being processed
@@ -2628,6 +2632,9 @@ impl Chain {
         prev_block_header: &BlockHeader,
         chunk: &ShardChunk,
     ) -> Vec<bool> {
+        let _timer = metrics::CHAIN_DETAIL_TIME
+            .with_label_values(&["validate_chunk_transactions"])
+            .start_timer();
         self.chain_store().compute_transaction_validity(prev_block_header, chunk)
     }
 
