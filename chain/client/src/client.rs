@@ -1655,7 +1655,9 @@ impl Client {
             target: "client",
             "produce_chunks",
             ?validator_id,
-            block_height = block.header().height())
+            block_height = block.header().height(),
+            measure = "phase",
+        )
         .entered();
 
         #[cfg(feature = "test_features")]

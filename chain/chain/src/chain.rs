@@ -1820,6 +1820,7 @@ impl Chain {
         let _span = tracing::debug_span!(
             target: "chain",
             "postprocess_ready_block",
+            measure = "phase",
             height = block.header().height())
         .entered();
 
@@ -2211,6 +2212,8 @@ impl Chain {
         block_received_time: Instant,
         state_patch: SandboxStatePatch,
     ) -> Result<PreprocessBlockResult, Error> {
+        let _span =
+            tracing::debug_span!(target: "chain", "preprocess_block", measure = "phase").entered();
         let header = block.header();
 
         // see if the block is already in processing or if there are too many blocks being processed
@@ -2628,6 +2631,8 @@ impl Chain {
         prev_block_header: &BlockHeader,
         chunk: &ShardChunk,
     ) -> Vec<bool> {
+        let _span =
+            tracing::debug_span!(target: "chain", "validate_chunk_transactions", measure = "detail").entered();
         self.chain_store().compute_transaction_validity(prev_block_header, chunk)
     }
 
