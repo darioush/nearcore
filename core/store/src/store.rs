@@ -5,6 +5,8 @@ use std::{fmt, io};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_fmt::{AbbrBytes, StorageKey};
+use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use crate::DBCol;
 use crate::adapter::{StoreAdapter, StoreUpdateAdapter};
@@ -31,6 +33,19 @@ impl StoreAdapter for Store {
     }
 }
 
+static BG_COLS: LazyLock<HashSet<&'static DBCol>> = LazyLock::new(|| {
+    let mut m = HashSet::new();
+    //m.extend([
+    //&DBCol::TrieChanges,
+    //&DBCol::TransactionResultForBlock,
+    //&DBCol::State,
+    //&DBCol::StateTransitionData,
+    //&DBCol::StateChanges,
+    //&DBCol::FlatStateChanges,
+    //]);
+    m
+});
+
 impl Store {
     pub fn new(storage: Arc<dyn Database>) -> Self {
         Self { storage }
@@ -43,18 +58,21 @@ impl Store {
     /// a slice, for cases when caller doesn’t need to own the value, and
     /// provides conversion into a vector or an Arc.
     pub fn get(&self, column: DBCol, key: &[u8]) -> io::Result<Option<DBSlice<'_>>> {
+        let _span = tracing::debug_span!(
+            target: "store",
+            "Store::get",
+            db_op = "get",
+            col = %column,
+            measure = "detail",
+            // key = %StorageKey(key),
+            // size = value.as_deref().map(<[u8]>::len)
+        )
+        .entered();
         let value = if column.is_rc() {
             self.storage.get_with_rc_stripped(column, &key)
         } else {
             self.storage.get_raw_bytes(column, &key)
         }?;
-        tracing::trace!(
-            target: "store",
-            db_op = "get",
-            col = %column,
-            key = %StorageKey(key),
-            size = value.as_deref().map(<[u8]>::len)
-        );
         Ok(value)
     }
 
@@ -449,31 +467,31 @@ impl StoreUpdate {
                         target: "store::update::transactions",
                         db_op = "insert",
                         %col,
-                        key = %StorageKey(key),
-                        size = value.len(),
-                        value = %AbbrBytes(value),
+                        // key = %StorageKey(key),
+                        // size = value.len(),
+                        // value = %AbbrBytes(value),
                     ),
                     DBOp::Set { col, key, value } => tracing::trace!(
                         target: "store::update::transactions",
                         db_op = "set",
                         %col,
-                        key = %StorageKey(key),
-                        size = value.len(),
-                        value = %AbbrBytes(value)
+                        // key = %StorageKey(key),
+                        // size = value.len(),
+                        // value = %AbbrBytes(value)
                     ),
                     DBOp::UpdateRefcount { col, key, value } => tracing::trace!(
                         target: "store::update::transactions",
                         db_op = "update_rc",
                         %col,
-                        key = %StorageKey(key),
-                        size = value.len(),
-                        value = %AbbrBytes(value)
+                        // key = %StorageKey(key),
+                        // size = value.len(),
+                        // value = %AbbrBytes(value)
                     ),
                     DBOp::Delete { col, key } => tracing::trace!(
                         target: "store::update::transactions",
                         db_op = "delete",
                         %col,
-                        key = %StorageKey(key)
+                        // key = %StorageKey(key)
                     ),
                     DBOp::DeleteAll { col } => tracing::trace!(
                         target: "store::update::transactions",
@@ -484,13 +502,43 @@ impl StoreUpdate {
                         target: "store::update::transactions",
                         db_op = "delete_range",
                         %col,
-                        from = %StorageKey(from),
-                        to = %StorageKey(to)
+                        // from = %StorageKey(from),
+                        // to = %StorageKey(to)
                     ),
                 }
             }
         }
-        self.store.storage.write(self.transaction)
+
+        let transaction = self.transaction;
+        let (tx, bg_tx) = Self::split_transaction(transaction);
+        if bg_tx.ops.len() > 0 {
+            let storage = self.store.storage.clone();
+            // self.store.storage.write_bg(bg_tx, storage)?;
+            std::thread::spawn(move || {
+                let _span =
+                    tracing::debug_span!(target: "store", "StoreUpdate::commit_bg", measure="detail").entered();
+                storage.write(bg_tx).unwrap();
+            });
+        }
+        self.store.storage.write(tx)
+    }
+
+    fn split_transaction(tx: DBTransaction) -> (DBTransaction, DBTransaction) {
+        let mut transaction = DBTransaction::new();
+        let mut bg_transaction = DBTransaction::new();
+
+        for op in tx.ops {
+            if op.col() == DBCol::TransactionResultForBlock {
+                continue;
+            }
+            if BG_COLS.contains(&op.col()) {
+                bg_transaction.ops.push(op);
+            } else {
+                transaction.ops.push(op);
+            }
+        }
+
+        (transaction, bg_transaction)
     }
 }
 
