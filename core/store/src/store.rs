@@ -1,3 +1,4 @@
+use core::panic;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -58,7 +59,22 @@ impl Store {
         Ok(value)
     }
 
-    pub fn get_ser<T: BorshDeserialize>(&self, column: DBCol, key: &[u8]) -> io::Result<Option<T>> {
+    pub fn get_ser<T: BorshDeserialize + Clone + 'static>(
+        &self,
+        column: DBCol,
+        key: &[u8],
+    ) -> io::Result<Option<T>> {
+        if let Some(anything) = self.storage.get_anything(column, key)? {
+            if anything.type_id() != std::any::TypeId::of::<T>() {
+                panic!(
+                    "Type mismatch: expected {}, got {:?}",
+                    std::any::type_name::<T>(),
+                    anything.type_id(),
+                );
+            }
+            let cloned = anything.as_any().downcast_ref::<T>().cloned();
+            return Ok(cloned);
+        }
         self.get(column, key)?.as_deref().map(T::try_from_slice).transpose()
     }
 
@@ -242,7 +258,19 @@ impl StoreUpdate {
     /// `CryptoHash` as key, which has the data in a small fixed-sized array.
     /// Copying and allocating that is not prohibitively expensive and we have
     /// to do it either way. Thus, we take a slice for the key for the nice API.
-    pub fn insert_ser<T: BorshSerialize>(
+    pub fn insert_ser<T: BorshSerialize + Clone + 'static + Send>(
+        &mut self,
+        column: DBCol,
+        key: &[u8],
+        value: &T,
+    ) -> io::Result<()> {
+        assert!(column.is_insert_only(), "can't insert_ser: {column}");
+        let data = borsh::to_vec(&value)?;
+        self.transaction.insert_anything(column, key.to_vec(), data, value.clone());
+        Ok(())
+    }
+
+    pub fn insert_ser_no_clone<T: BorshSerialize>(
         &mut self,
         column: DBCol,
         key: &[u8],
@@ -320,7 +348,7 @@ impl StoreUpdate {
     ///
     /// Must not be used for reference-counted columns; use
     /// ['Self::increment_refcount'] or [`Self::decrement_refcount`] instead.
-    pub fn set_ser<T: BorshSerialize + ?Sized + Clone + 'static>(
+    pub fn set_ser<T: BorshSerialize + ?Sized + Clone + 'static + Send>(
         &mut self,
         column: DBCol,
         key: &[u8],
@@ -328,7 +356,7 @@ impl StoreUpdate {
     ) -> io::Result<()> {
         assert!(!(column.is_rc() || column.is_insert_only()), "can't set_ser: {column}");
         let data = borsh::to_vec(&value)?;
-        self.set(column, key, &data);
+        self.transaction.set_anything(column, key.to_vec(), data, value.clone());
         Ok(())
     }
 
@@ -455,7 +483,7 @@ impl StoreUpdate {
         if tracing::event_enabled!(target: "store::update::transactions", tracing::Level::TRACE) {
             for op in &self.transaction.ops {
                 match op {
-                    DBOp::Insert { col, key, value } => tracing::trace!(
+                    DBOp::Insert { col, key, value, .. } => tracing::trace!(
                         target: "store::update::transactions",
                         db_op = "insert",
                         %col,
@@ -463,7 +491,7 @@ impl StoreUpdate {
                         size = value.len(),
                         value = %AbbrBytes(value),
                     ),
-                    DBOp::Set { col, key, value } => tracing::trace!(
+                    DBOp::Set { col, key, value, .. } => tracing::trace!(
                         target: "store::update::transactions",
                         db_op = "set",
                         %col,

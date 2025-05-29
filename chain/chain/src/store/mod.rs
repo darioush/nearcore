@@ -1932,7 +1932,7 @@ impl<'a> ChainStoreUpdate<'a> {
                 store_update.insert_ser(
                     DBCol::TransactionResultForBlock,
                     &get_outcome_id_block_hash(outcome_id, block_hash),
-                    &outcome_with_proof,
+                    outcome_with_proof,
                 )?;
             }
             for ((block_hash, shard_id), ids) in &self.chain_store_cache_update.outcome_ids {
