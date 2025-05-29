@@ -144,7 +144,7 @@ impl EpochConfig {
             fishermen_threshold: 0,
             minimum_stake_divisor: 0,
             protocol_upgrade_stake_threshold: 0.into(),
-            shard_layout: ShardLayout::get_simple_nightshade_layout(),
+            shard_layout: ShardLayout::single_shard(),
             num_chunk_producer_seats: 100,
             num_chunk_validator_seats: 300,
             num_chunk_only_producer_seats: 300,
@@ -248,7 +248,7 @@ impl AllEpochConfig {
     }
 }
 
-#[derive(BorshSerialize, BorshDeserialize, ProtocolSchema)]
+#[derive(BorshSerialize, BorshDeserialize, ProtocolSchema, Clone)]
 pub struct EpochSummary {
     pub prev_epoch_last_block_hash: CryptoHash,
     /// Proposals from the epoch, only the latest one per account

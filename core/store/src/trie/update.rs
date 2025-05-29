@@ -191,6 +191,19 @@ impl TrieUpdate {
             .map(|opt| opt.map(|code| ContractCode::new(code, code_hash)))
     }
 
+    pub fn get_global_contract_code(
+        &self,
+        identifier: GlobalContractCodeIdentifier,
+    ) -> Result<Option<ContractCode>, StorageError> {
+        let code_hash = match identifier {
+            GlobalContractCodeIdentifier::CodeHash(hash) => Some(hash),
+            GlobalContractCodeIdentifier::AccountId(_) => None,
+        };
+        let key = TrieKey::GlobalContractCode { identifier };
+        self.get(&key, AccessOptions::DEFAULT)
+            .map(|opt| opt.map(|code| ContractCode::new(code, code_hash)))
+    }
+
     /// Returns the size (in num bytes) of the contract code for the given account.
     ///
     /// This is different from `get_code` in that it does not read the code from storage.
@@ -346,11 +359,7 @@ impl TrieUpdate {
             .or_else(|err| {
                 // If the value for the trie key is not found, we treat it as if the contract does not exist.
                 // In this case, we ignore the error and skip recording the contract call below.
-                if matches!(err, StorageError::MissingTrieValue(_, _)) {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
+                if matches!(err, StorageError::MissingTrieValue(_)) { Ok(None) } else { Err(err) }
             })?;
         let contract_exists =
             contract_ref.is_some_and(|value_ref| value_ref.value_hash() == code_hash);

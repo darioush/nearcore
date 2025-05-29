@@ -1,5 +1,5 @@
 use crate::env::nightshade_setup::TestEnvNightshadeSetupExt;
-use crate::env::setup::{setup_mock, setup_mock_all_validators};
+use crate::env::setup::setup_mock;
 use crate::env::test_env::TestEnv;
 use crate::env::test_env_builder::TestEnvBuilder;
 use crate::utils::process_blocks::{
@@ -11,7 +11,6 @@ use futures::{FutureExt, future};
 use itertools::Itertools;
 use near_actix_test_utils::run_actix;
 use near_async::time::{Clock, Duration};
-use near_chain::test_utils::ValidatorSchedule;
 use near_chain::types::{LatestKnown, RuntimeAdapter};
 use near_chain::validate::validate_chunk_with_chunk_extra;
 use near_chain::{Block, BlockProcessingArtifact, ChainStoreAccess, Error, Provenance};
@@ -23,7 +22,7 @@ use near_client::{
     BlockApproval, BlockResponse, GetBlockWithMerkleTree, ProcessTxResponse, ProduceChunkResult,
     SetNetworkInfo,
 };
-use near_crypto::{InMemorySigner, KeyType, PublicKey, Signature};
+use near_crypto::{InMemorySigner, KeyType, Signature};
 use near_network::test_utils::{MockPeerManagerAdapter, wait_or_panic};
 use near_network::types::{
     BlockInfo, ConnectedPeerInfo, HighestHeightPeerInfo, NetworkInfo, PeerChainInfo,
@@ -58,7 +57,6 @@ use near_primitives::transaction::{
     Transaction, TransactionV0,
 };
 use near_primitives::trie_key::TrieKey;
-use near_primitives::types::validator_stake::ValidatorStake;
 use near_primitives::types::{AccountId, BlockHeight, EpochId, NumBlocks};
 use near_primitives::version::PROTOCOL_VERSION;
 use near_primitives::views::{FinalExecutionStatus, QueryRequest, QueryResponseKind};
@@ -288,92 +286,6 @@ fn produce_block_with_approvals() {
     });
 }
 
-/// When approvals arrive early, they should be properly cached.
-#[test]
-fn slow_test_produce_block_with_approvals_arrived_early() {
-    init_test_logger();
-    let vs = ValidatorSchedule::new().num_shards(4).block_producers_per_epoch(vec![vec![
-        "test1".parse().unwrap(),
-        "test2".parse().unwrap(),
-        "test3".parse().unwrap(),
-        "test4".parse().unwrap(),
-    ]]);
-    let archive = vec![false; vs.all_block_producers().count()];
-    let key_pairs =
-        vec![PeerInfo::random(), PeerInfo::random(), PeerInfo::random(), PeerInfo::random()];
-    let block_holder: Arc<RwLock<Option<Block>>> = Arc::new(RwLock::new(None));
-    run_actix(async move {
-        let mut approval_counter = 0;
-        setup_mock_all_validators(
-            Clock::real(),
-            vs,
-            key_pairs,
-            true,
-            2000,
-            false,
-            false,
-            100,
-            true,
-            archive,
-            false,
-            None,
-            Box::new(
-                move |conns,
-                      _,
-                      msg: &PeerManagerMessageRequest|
-                      -> (PeerManagerMessageResponse, bool) {
-                    let msg = msg.as_network_requests_ref();
-                    match msg {
-                        NetworkRequests::Block { block } => {
-                            if block.header().height() == 3 {
-                                for (i, actor_handles) in conns.iter().enumerate() {
-                                    if i > 0 {
-                                        actor_handles.client_actor.do_send(
-                                            BlockResponse {
-                                                block: block.clone(),
-                                                peer_id: PeerInfo::random().id,
-                                                was_requested: false,
-                                            }
-                                            .with_span_context(),
-                                        )
-                                    }
-                                }
-                                *block_holder.write() = Some(block.clone());
-                                return (NetworkResponses::NoResponse.into(), false);
-                            } else if block.header().height() == 4 {
-                                System::current().stop();
-                            }
-                            (NetworkResponses::NoResponse.into(), true)
-                        }
-                        NetworkRequests::Approval { approval_message } => {
-                            if approval_message.target == "test1"
-                                && approval_message.approval.target_height == 4
-                            {
-                                approval_counter += 1;
-                            }
-                            if approval_counter == 3 {
-                                let block = block_holder.read().clone().unwrap();
-                                conns[0].client_actor.do_send(
-                                    BlockResponse {
-                                        block,
-                                        peer_id: PeerInfo::random().id,
-                                        was_requested: false,
-                                    }
-                                    .with_span_context(),
-                                );
-                            }
-                            (NetworkResponses::NoResponse.into(), true)
-                        }
-                        _ => (NetworkResponses::NoResponse.into(), true),
-                    }
-                },
-            ),
-        );
-
-        near_network::test_utils::wait_or_panic(10000);
-    });
-}
-
 /// Sends one invalid block followed by one valid block, and checks that client announces only valid block.
 /// and that the node bans the peer for invalid block header.
 fn invalid_blocks_common(is_requested: bool) {
@@ -536,173 +448,6 @@ fn test_invalid_blocks_not_requested() {
 #[test]
 fn test_invalid_blocks_requested() {
     invalid_blocks_common(true);
-}
-
-enum InvalidBlockMode {
-    /// Header is invalid
-    InvalidHeader,
-    /// Block is ill-formed (roots check fail)
-    IllFormed,
-    /// Block is invalid for other reasons
-    InvalidBlock,
-}
-
-fn ban_peer_for_invalid_block_common(mode: InvalidBlockMode) {
-    init_test_logger();
-    let vs = ValidatorSchedule::new().block_producers_per_epoch(vec![vec![
-        "test1".parse().unwrap(),
-        "test2".parse().unwrap(),
-        "test3".parse().unwrap(),
-        "test4".parse().unwrap(),
-    ]]);
-    let validators = vs.all_block_producers().cloned().collect::<Vec<_>>();
-    let key_pairs =
-        vec![PeerInfo::random(), PeerInfo::random(), PeerInfo::random(), PeerInfo::random()];
-    run_actix(async move {
-        let mut ban_counter = 0;
-        let mut sent_bad_blocks = false;
-        setup_mock_all_validators(
-            Clock::real(),
-            vs,
-            key_pairs,
-            true,
-            100,
-            false,
-            false,
-            100,
-            true,
-            vec![false; validators.len()],
-            false,
-            None,
-            Box::new(
-                move |conns,
-                      _,
-                      msg: &PeerManagerMessageRequest|
-                      -> (PeerManagerMessageResponse, bool) {
-                    match msg.as_network_requests_ref() {
-                        NetworkRequests::Block { block } => {
-                            if block.header().height() >= 4 && !sent_bad_blocks {
-                                let block_producer_idx =
-                                    block.header().height() as usize % validators.len();
-                                let block_producer = &validators[block_producer_idx];
-                                let validator_signer1 = create_test_signer(block_producer.as_str());
-                                sent_bad_blocks = true;
-                                let mut block_mut = block.clone();
-                                match mode {
-                                    InvalidBlockMode::InvalidHeader => {
-                                        // produce an invalid block with invalid header.
-                                        block_mut.mut_header().set_chunk_mask(vec![]);
-                                        block_mut.mut_header().resign(&validator_signer1);
-                                    }
-                                    InvalidBlockMode::IllFormed => {
-                                        // produce an ill-formed block
-                                        block_mut.mut_header().set_chunk_headers_root(hash(&[1]));
-                                        block_mut.mut_header().resign(&validator_signer1);
-                                    }
-                                    InvalidBlockMode::InvalidBlock => {
-                                        // produce an invalid block whose invalidity cannot be verified by just
-                                        // having its header.
-                                        let proposals = vec![ValidatorStake::new(
-                                            "test1".parse().unwrap(),
-                                            PublicKey::empty(KeyType::ED25519),
-                                            0,
-                                        )];
-
-                                        block_mut
-                                            .mut_header()
-                                            .set_prev_validator_proposals(proposals);
-                                        block_mut.mut_header().resign(&validator_signer1);
-                                    }
-                                }
-
-                                for (i, actor_handles) in conns.into_iter().enumerate() {
-                                    if i != block_producer_idx {
-                                        actor_handles.client_actor.do_send(
-                                            BlockResponse {
-                                                block: block_mut.clone(),
-                                                peer_id: PeerInfo::random().id,
-                                                was_requested: false,
-                                            }
-                                            .with_span_context(),
-                                        )
-                                    }
-                                }
-
-                                return (
-                                    PeerManagerMessageResponse::NetworkResponses(
-                                        NetworkResponses::NoResponse,
-                                    ),
-                                    false,
-                                );
-                            }
-                            if block.header().height() > 20 {
-                                match mode {
-                                    InvalidBlockMode::InvalidHeader
-                                    | InvalidBlockMode::IllFormed => {
-                                        assert_eq!(ban_counter, 3);
-                                    }
-                                    _ => {}
-                                }
-                                System::current().stop();
-                            }
-                            (
-                                PeerManagerMessageResponse::NetworkResponses(
-                                    NetworkResponses::NoResponse,
-                                ),
-                                true,
-                            )
-                        }
-                        NetworkRequests::BanPeer { peer_id, ban_reason } => match mode {
-                            InvalidBlockMode::InvalidHeader | InvalidBlockMode::IllFormed => {
-                                assert_eq!(ban_reason, &ReasonForBan::BadBlockHeader);
-                                ban_counter += 1;
-                                if ban_counter > 3 {
-                                    panic!("more bans than expected");
-                                }
-                                (
-                                    PeerManagerMessageResponse::NetworkResponses(
-                                        NetworkResponses::NoResponse,
-                                    ),
-                                    true,
-                                )
-                            }
-                            InvalidBlockMode::InvalidBlock => {
-                                panic!(
-                                    "banning peer {:?} unexpectedly for {:?}",
-                                    peer_id, ban_reason
-                                );
-                            }
-                        },
-                        _ => (
-                            PeerManagerMessageResponse::NetworkResponses(
-                                NetworkResponses::NoResponse,
-                            ),
-                            true,
-                        ),
-                    }
-                },
-            ),
-        );
-        near_network::test_utils::wait_or_panic(20000);
-    });
-}
-
-/// If a peer sends a block whose header is valid and passes basic validation, the peer is not banned.
-#[test]
-fn test_not_ban_peer_for_invalid_block() {
-    ban_peer_for_invalid_block_common(InvalidBlockMode::InvalidBlock);
-}
-
-/// If a peer sends a block whose header is invalid, we should ban them and do not forward the block
-#[test]
-fn test_ban_peer_for_invalid_block_header() {
-    ban_peer_for_invalid_block_common(InvalidBlockMode::InvalidHeader);
-}
-
-/// If a peer sends a block that is ill-formed, we should ban them and do not forward the block
-#[test]
-fn test_ban_peer_for_ill_formed_block() {
-    ban_peer_for_invalid_block_common(InvalidBlockMode::IllFormed);
 }
 
 /// Runs two validators runtime with only one validator online.
@@ -1288,8 +1033,8 @@ fn test_archival_gc_common(
         let header = block.header();
         let epoch_id = header.epoch_id();
         let shard_layout = env.clients[0].epoch_manager.get_shard_layout(epoch_id).unwrap();
-        let is_last_block_in_epoch =
-            env.clients[0].epoch_manager.is_next_block_epoch_start(header.hash()).unwrap();
+        let is_resharding_boundary =
+            env.clients[0].epoch_manager.is_resharding_boundary(header.prev_hash()).unwrap();
 
         blocks.push(block);
 
@@ -1299,7 +1044,7 @@ fn test_archival_gc_common(
                 hot_store,
                 &shard_layout,
                 &i,
-                is_last_block_in_epoch,
+                is_resharding_boundary,
                 1,
             )
             .unwrap();
@@ -3424,48 +3169,6 @@ fn test_catchup_no_sharding_change() {
                 .unwrap(),
             vec![]
         );
-    }
-}
-
-/// Run `gc_num_epochs_to_keep` epochs + several blocks.
-/// Start a second env from the "snapshot" of the first.
-/// Run one more epoch.
-/// "Restart from the snapshot" is to ensure that we can continue producing blocks without relying on caches.
-#[test]
-fn test_long_chain_with_restart_from_snapshot() {
-    init_test_logger();
-
-    let epoch_length = 25;
-
-    let mut genesis = Genesis::test(vec!["test0".parse().unwrap()], 1);
-
-    genesis.config.epoch_length = epoch_length;
-    let mut env1 =
-        TestEnv::builder(&genesis.config).nightshade_runtimes(&genesis).archive(false).build();
-
-    // In TestEnv `gc_blocks_limit` defaults to 100.
-    // That means that whole epoch will be garbage collected in one block.
-    // We want this test to have "more realistic" snapshot setup, where last kept epoch is only partially garbage collected.
-    //
-    // `gc_blocks_limit = 2` is the default setup in production.
-    env1.clients[0].config.gc.gc_blocks_limit = 2;
-
-    let max_height = epoch_length * env1.clients[0].config.gc.gc_num_epochs_to_keep + 3;
-
-    for h in 1..max_height {
-        let block = env1.clients[0].produce_block(h).unwrap().unwrap();
-        env1.process_block(0, block.clone(), Provenance::PRODUCED);
-    }
-
-    let mut env2 = TestEnv::builder(&genesis.config)
-        .stores(vec![env1.clients[0].chain.chain_store().store()])
-        .nightshade_runtimes(&genesis)
-        .archive(false)
-        .build();
-
-    for h in max_height..(max_height + epoch_length) {
-        let block = env2.clients[0].produce_block(h).unwrap().unwrap();
-        env2.process_block(0, block.clone(), Provenance::PRODUCED);
     }
 }
 

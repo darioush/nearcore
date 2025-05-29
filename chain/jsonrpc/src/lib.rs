@@ -363,6 +363,12 @@ impl JsonRpcHandler {
                     QueryRequest::ViewAccessKey { .. } => "query_view_access_key",
                     QueryRequest::ViewAccessKeyList { .. } => "query_view_access_key_list",
                     QueryRequest::CallFunction { .. } => "query_call_function",
+                    QueryRequest::ViewGlobalContractCode { .. } => {
+                        "query_view_global_contract_code"
+                    }
+                    QueryRequest::ViewGlobalContractCodeByAccountId { .. } => {
+                        "query_view_global_contract_code_by_account_id"
+                    }
                 };
                 (metrics_name.to_string(), process_query_response(self.query(params).await))
             }
@@ -1183,7 +1189,7 @@ impl JsonRpcHandler {
             account_id,
         } = request;
         let windows = self.view_client_send(GetMaintenanceWindows { account_id }).await?;
-        Ok(windows.iter().map(|r| (r.start, r.end)).collect())
+        Ok(windows)
     }
 
     async fn client_config(

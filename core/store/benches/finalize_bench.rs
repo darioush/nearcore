@@ -11,18 +11,15 @@
 //! `PartialEncodedChunk`. These have been observed to become quite large and
 //! have ab impact on the overall client performance.
 
-#[macro_use]
-extern crate bencher;
-
-use bencher::{Bencher, black_box};
+use bencher::{Bencher, benchmark_group, benchmark_main, black_box};
 use borsh::BorshSerialize;
 use near_chain::Chain;
 use near_crypto::{InMemorySigner, KeyType};
 use near_primitives::bandwidth_scheduler::BandwidthRequests;
+use near_primitives::epoch_manager::EpochConfigStore;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{MerklePathItem, merklize};
 use near_primitives::receipt::{ActionReceipt, DataReceipt, Receipt, ReceiptEnum, ReceiptV0};
-use near_primitives::shard_layout::ShardLayout;
 use near_primitives::sharding::{
     ChunkHash, EncodedShardChunk, PartialEncodedChunk, PartialEncodedChunkPart,
     PartialEncodedChunkV2, ReceiptProof, ShardChunk, ShardChunkHeader, ShardChunkHeaderV3,
@@ -33,6 +30,7 @@ use near_primitives::transaction::{
 };
 use near_primitives::types::{AccountId, ShardId};
 use near_primitives::validator_signer::{InMemoryValidatorSigner, ValidatorSigner};
+use near_primitives::version::PROTOCOL_VERSION;
 use near_store::DBCol;
 use rand::prelude::SliceRandom;
 use reed_solomon_erasure::galois_8::ReedSolomon;
@@ -52,7 +50,11 @@ fn benchmark_write_shard_chunk(bench: &mut Bencher) {
     bench.iter(|| {
         let mut update = store.store_update();
         update
-            .insert_ser(DBCol::Chunks, chunk_hash.as_ref(), &chunks.choose(&mut rand::thread_rng()))
+            .insert_ser_no_clone(
+                DBCol::Chunks,
+                chunk_hash.as_ref(),
+                &chunks.choose(&mut rand::thread_rng()),
+            )
             .unwrap();
         black_box(update);
     });
@@ -76,7 +78,7 @@ fn benchmark_write_partial_encoded_chunk(bench: &mut Bencher) {
     bench.iter(|| {
         let mut update = store.store_update();
         update
-            .insert_ser(
+            .insert_ser_no_clone(
                 DBCol::PartialChunks,
                 chunk_hash.as_ref(),
                 &chunks.choose(&mut rand::thread_rng()),
@@ -214,7 +216,9 @@ fn encoded_chunk_to_partial_encoded_chunk(
 ) -> PartialEncodedChunk {
     let header = encoded_chunk.cloned_header();
     let shard_id = header.shard_id();
-    let shard_layout = ShardLayout::get_simple_nightshade_layout_v2();
+
+    let epoch_config_store = EpochConfigStore::for_chain_id("mainnet", None).unwrap();
+    let shard_layout = epoch_config_store.get_config(PROTOCOL_VERSION).shard_layout.clone();
 
     let hashes = Chain::build_receipts_hashes(&receipts, &shard_layout).unwrap();
     let (_root, proofs) = merklize(&hashes);

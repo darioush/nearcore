@@ -211,7 +211,7 @@ impl ChainConfig {
             save_trie_changes: true,
             background_migration_threads: 1,
             resharding_config: MutableConfigValue::new(
-                ReshardingConfig::default(),
+                ReshardingConfig::test(),
                 "resharding_config",
             ),
         }
@@ -282,7 +282,14 @@ impl RuntimeStorageConfig {
 }
 
 #[derive(Clone)]
+pub enum BlockType {
+    Normal,
+    Optimistic,
+}
+
+#[derive(Clone)]
 pub struct ApplyChunkBlockContext {
+    pub block_type: BlockType,
     pub height: BlockHeight,
     pub block_hash: CryptoHash,
     pub prev_block_hash: CryptoHash,
@@ -301,6 +308,7 @@ impl ApplyChunkBlockContext {
         bandwidth_requests: BlockBandwidthRequests,
     ) -> Self {
         Self {
+            block_type: BlockType::Normal,
             height: header.height(),
             block_hash: *header.hash(),
             prev_block_hash: *header.prev_hash(),

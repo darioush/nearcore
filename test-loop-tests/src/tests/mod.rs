@@ -1,5 +1,6 @@
 mod bandwidth_scheduler;
 mod bug_repro;
+mod catching_up;
 mod chunk_validator_kickout;
 mod chunks_management;
 mod congestion_control;
@@ -20,9 +21,11 @@ mod malicious_chunk_producer;
 mod max_receipt_size;
 mod multinode_stateless_validators;
 mod optimistic_block;
+mod process_blocks;
 mod protocol_upgrade;
 mod reject_outdated_blocks;
 mod resharding_v3;
+mod spice;
 mod state_sync;
 mod syncing;
 mod view_requests_to_archival_node;

@@ -1,7 +1,5 @@
 #![cfg_attr(enable_const_type_id, feature(const_type_id))]
 
-extern crate core;
-
 pub use crate::columns::DBCol;
 pub use crate::config::{Mode, StoreConfig};
 pub use crate::db::{
@@ -25,7 +23,7 @@ pub use crate::trie::{
     estimator,
 };
 pub use crate::utils::*;
-pub use near_primitives::errors::{MissingTrieValueContext, StorageError};
+pub use near_primitives::errors::{MissingTrieValue, MissingTrieValueContext, StorageError};
 pub use near_primitives::shard_layout::ShardUId;
 
 pub mod adapter;

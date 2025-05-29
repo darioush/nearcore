@@ -14,6 +14,8 @@ use near_parameters::RuntimeConfig;
 use near_primitives_core::serialize::{from_base64, to_base64};
 use near_primitives_core::types::Compute;
 use near_schema_checker_lib::ProtocolSchema;
+#[cfg(feature = "schemars")]
+use schemars::json_schema;
 use serde::de::Error as DecodeError;
 use serde::ser::Error as EncodeError;
 use std::borrow::Borrow;
@@ -248,8 +250,7 @@ impl ValidatedTransaction {
         }
     }
 
-    /// This method should only be used for test purposes.  This is because
-    /// kv_runtime is not designed to do proper signature verification.
+    /// This method should only be used for test purposes.
     pub fn new_for_test(signed_tx: SignedTransaction) -> Self {
         Self(signed_tx)
     }
@@ -409,6 +410,20 @@ impl<'de> serde::Deserialize<'de> for SignedTransaction {
         })?;
         borsh::from_slice::<Self>(&signed_tx_borsh).map_err(|err| {
             D::Error::custom(&format!("the value could not decoded from borsh due to: {}", err))
+        })
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for SignedTransaction {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SignedTransaction".to_string().into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        json_schema!({
+            "type": "string",
+            "format": "byte"
         })
     }
 }
