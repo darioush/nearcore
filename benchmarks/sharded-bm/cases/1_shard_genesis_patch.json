@@ -1,7 +1,7 @@
 {
   "chain_id": "benchmarknet",
   "epoch_length": 15000,
-  "gas_limit": "20000000000000000",
+  "gas_limit": "50000000000000000",
   "shard_layout": {
     "V2": {
       "boundary_accounts": [],

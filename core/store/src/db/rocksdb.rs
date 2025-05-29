@@ -7,6 +7,7 @@ use ::rocksdb::{
 use anyhow::Context;
 use itertools::Itertools;
 use parking_lot::RwLock;
+use rayon::ThreadPoolBuilder;
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -64,6 +65,7 @@ pub struct RocksDB {
     // RAII-style of keeping track of the number of instances of RocksDB and
     // counting total sum of max_open_files.
     _instance_tracker: instance_tracker::InstanceTracker,
+    bg_writer: Arc<Option<rayon::ThreadPool>>,
 }
 
 // DB was already Send+Sync. cf and read_options are const pointers using only functions in
@@ -130,7 +132,23 @@ impl RocksDB {
             Arc::new(RwLock::new(enum_map::EnumMap::<DBCol, AnythingCache>::from_fn(|col| {
                 FifoCache::new(store_config.col_cache_capacity(col))
             })));
-        Ok(Self { db, db_opt, cf_handles, cache, _instance_tracker: counter })
+        tracing::warn!(
+            target: "store",
+            "Starting background writer thread",
+        );
+        let pool: rayon::ThreadPool = ThreadPoolBuilder::new()
+            .num_threads(5)
+            .thread_name(|i| format!("store-bg-writer-{i}"))
+            .build()
+            .expect("Failed to create thread pool");
+        Ok(Self {
+            db,
+            db_opt,
+            cf_handles,
+            cache,
+            _instance_tracker: counter,
+            bg_writer: Arc::new(Some(pool)),
+        })
     }
 
     /// Opens the database with given column families configured.
@@ -433,6 +451,30 @@ impl Database for RocksDB {
         self.db.write(batch).map_err(io::Error::other)
     }
 
+    fn write_bg(&self, batch: DBTransaction, write_to: Arc<dyn Database>) -> io::Result<()> {
+        let Some(pool) = self.bg_writer.as_ref() else {
+            return self.write(batch);
+        };
+        pool.spawn(move || {
+            let _span = tracing::debug_span!(
+                target: "store", "Store::commit_bg", measure="detail"
+            )
+            .entered();
+            tracing::warn!(target:"store",
+                "writing batch (background) {ops}",
+                ops=batch.ops.len(),
+            );
+            write_to.write(batch).unwrap_or_else(|err| {
+                tracing::error!(
+                    target: "store::db::rocksdb",
+                    "Failed to write to RocksDB: {:?}",
+                    err
+                );
+            });
+        });
+        Ok(())
+    }
+
     #[tracing::instrument(
         target = "store::db::rocksdb",
         level = "info",
@@ -543,6 +585,9 @@ fn cf_descriptors(
 /// DB level options
 fn common_rocksdb_options() -> Options {
     let mut opts = Options::default();
+
+    opts.set_enable_blob_files(true);
+    opts.set_blob_file_size(1024);
 
     set_compression_options(&mut opts);
     opts.set_use_fsync(false);

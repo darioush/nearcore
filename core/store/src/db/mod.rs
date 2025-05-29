@@ -53,14 +53,14 @@ pub struct DBTransaction {
     pub(crate) ops: Vec<DBOp>,
 }
 
-pub trait CloneAny: Any + Send {
+pub trait CloneAny: Any + Sync + Send {
     fn clone_box(&self) -> Box<dyn CloneAny>;
     fn as_any(&self) -> &dyn Any;
 }
 
 impl<T> CloneAny for T
 where
-    T: Any + Send + Clone + 'static,
+    T: Any + Sync + Send + Clone + 'static,
 {
     fn clone_box(&self) -> Box<dyn CloneAny> {
         Box::new(self.clone())
@@ -71,25 +71,56 @@ where
     }
 }
 
-pub struct Anything(TypeId, Box<dyn CloneAny>);
+pub struct Anything {
+    id: TypeId,
+    arc_id: TypeId,
+    any: Box<dyn CloneAny>,
+    arc_any: Box<dyn CloneAny>,
+    //name: &'static str,
+}
 
 impl Anything {
     pub fn new<T: CloneAny>(value: T) -> Self {
-        Self(TypeId::of::<T>(), Box::new(value))
+        Self {
+            id: TypeId::of::<T>(),
+            arc_id: TypeId::of::<Arc<T>>(),
+            any: value.clone_box(),
+            arc_any: Box::new(Arc::new(value)),
+            //name: std::any::type_name::<T>(),
+        }
     }
 
     pub fn type_id(&self) -> TypeId {
-        self.0
+        self.id
+    }
+
+    pub fn arc_type_id(&self) -> TypeId {
+        self.arc_id
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        //self.name
+        "foo"
     }
 
     pub fn as_any(&self) -> &dyn Any {
-        self.1.as_any()
+        self.any.as_any()
+    }
+
+    pub fn as_arc_any(&self) -> &dyn Any {
+        self.arc_any.as_any()
     }
 }
 
 impl Clone for Anything {
     fn clone(&self) -> Self {
-        Self(self.0, self.1.clone_box())
+        Self {
+            id: self.id,
+            arc_id: self.arc_id,
+            any: self.any.clone_box(),
+            arc_any: self.arc_any.clone_box(),
+            //name: self.name,
+        }
     }
 }
 
@@ -302,6 +333,12 @@ pub trait Database: Sync + Send {
 
     /// Atomically apply all operations in given batch at once.
     fn write(&self, batch: DBTransaction) -> io::Result<()>;
+    fn write_without_wal(&self, batch: DBTransaction) -> io::Result<()> {
+        self.write(batch)
+    }
+    fn write_bg(&self, batch: DBTransaction, _write_to: Arc<dyn Database>) -> io::Result<()> {
+        self.write(batch)
+    }
 
     /// Flush all in-memory data to disk.
     ///

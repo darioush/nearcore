@@ -3,6 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use chrono::Utc;
 pub use latest_witnesses::LatestWitnessesInfo;
 pub use merkle_proof::MerkleProofAccess;
+use near_cache::SyncLruCache;
 use near_chain_primitives::error::Error;
 use near_epoch_manager::EpochManagerAdapter;
 use near_primitives::block::Tip;
@@ -270,6 +271,9 @@ pub struct ChainStore {
     save_trie_changes: bool,
     /// The maximum number of blocks for which a transaction is valid since its creation.
     pub(super) transaction_validity_period: BlockHeightDelta,
+
+    /// Cache for block headers to avoid frequent database lookups
+    block_hash_by_height_cache: Arc<SyncLruCache<BlockHeight, Option<CryptoHash>>>,
 }
 
 impl Deref for ChainStore {
@@ -302,6 +306,7 @@ impl ChainStore {
             latest_known: std::cell::Cell::new(None),
             save_trie_changes,
             transaction_validity_period,
+            block_hash_by_height_cache: Arc::new(SyncLruCache::new(1000)),
         }
     }
 
@@ -813,6 +818,10 @@ impl ChainStore {
         // otherwise should be orphaned)
         Ok(!chain_store.get_blocks_to_catchup(prev_prev_hash)?.contains(prev_hash))
     }
+
+    fn set_block_hash_by_height(&self, height: BlockHeight, hash: Option<CryptoHash>) {
+        self.block_hash_by_height_cache.put(height, hash);
+    }
 }
 
 impl ChainStoreAccess for ChainStore {
@@ -910,7 +919,15 @@ impl ChainStoreAccess for ChainStore {
 
     /// Returns hash of the block on the main chain for given height.
     fn get_block_hash_by_height(&self, height: BlockHeight) -> Result<CryptoHash, Error> {
-        ChainStoreAdapter::get_block_hash_by_height(self, height)
+        if let Some(hash) = self.block_hash_by_height_cache.get(&height) {
+            if let Some(hash) = hash {
+                return Ok(hash);
+            }
+        }
+
+        let hash = ChainStoreAdapter::get_block_hash_by_height(self, height)?;
+        self.block_hash_by_height_cache.put(height, Some(hash));
+        Ok(hash)
     }
 
     fn get_next_block_hash(&self, hash: &CryptoHash) -> Result<CryptoHash, Error> {
@@ -1592,6 +1609,8 @@ impl<'a> ChainStoreUpdate<'a> {
         outcomes: Vec<ExecutionOutcomeWithId>,
         proofs: Vec<MerklePath>,
     ) {
+        return;
+
         let mut outcome_ids = Vec::with_capacity(outcomes.len());
         for (outcome_with_id, proof) in outcomes.into_iter().zip(proofs.into_iter()) {
             outcome_ids.push(outcome_with_id.id);
@@ -1805,7 +1824,7 @@ impl<'a> ChainStoreUpdate<'a> {
                 store_update.set_ser(
                     DBCol::ChunkExtra,
                     &get_block_shard_uid(block_hash, shard_uid),
-                    chunk_extra,
+                    chunk_extra.as_ref(),
                 )?;
             }
         }
@@ -1847,7 +1866,9 @@ impl<'a> ChainStoreUpdate<'a> {
                     );
                 }
 
-                store_update.insert_ser(DBCol::Chunks, chunk_hash.as_ref(), chunk)?;
+                let shard_chunk = ShardChunk::from(chunk.as_ref());
+                store_update.insert_ser(DBCol::Chunks, chunk_hash.as_ref(), &shard_chunk)?;
+                //store_update.insert_ser_no_clone(DBCol::Chunks, chunk_hash.as_ref(), chunk)?;
             }
             for (height, hash_set) in chunk_hashes_by_height {
                 store_update.set_ser(
@@ -1880,6 +1901,7 @@ impl<'a> ChainStoreUpdate<'a> {
         }
 
         for (height, hash) in &self.chain_store_cache_update.height_to_hashes {
+            self.chain_store.set_block_hash_by_height(*height, *hash);
             if let Some(hash) = hash {
                 store_update.set_ser(DBCol::BlockHeight, &index_to_bytes(*height), hash)?;
             } else {

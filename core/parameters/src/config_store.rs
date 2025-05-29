@@ -183,7 +183,7 @@ impl RuntimeConfigStore {
             near_primitives_core::chains::BENCHMARKNET => {
                 let mut config_store = Self::new(None);
                 let mut config = RuntimeConfig::clone(config_store.get_config(PROTOCOL_VERSION));
-                config.congestion_control_config = CongestionControlConfig::test_disabled();
+                // config.congestion_control_config = CongestionControlConfig::test_disabled();
                 config.bandwidth_scheduler_config = BandwidthSchedulerConfig::test_disabled();
                 config.witness_config = WitnessConfig::test_disabled();
                 let mut wasm_config = vm::Config::clone(&config.wasm_config);

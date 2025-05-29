@@ -37,6 +37,7 @@ near-chain-configs = { workspace = true, features = [
     "test_genesis",
     "test_utils",
 ] }
+near-cache.workspace = true
 near-chain-primitives.workspace = true
 near-client-primitives.workspace = true
 near-crypto.workspace = true

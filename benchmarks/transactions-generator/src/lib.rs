@@ -1,7 +1,7 @@
 use near_async::messaging::AsyncSender;
 use near_client::{GetBlock, Query, QueryError};
 use near_client_primitives::types::GetBlockError;
-use near_crypto::PublicKey;
+use near_crypto::{PublicKey, Signer};
 use near_network::client::{ProcessTxRequest, ProcessTxResponse};
 use near_primitives::hash::CryptoHash;
 use near_primitives::transaction::SignedTransaction;
@@ -127,6 +127,7 @@ impl TxGenerator {
     async fn generate_send_transaction(
         rnd: &mut StdRng,
         accounts: &[account::Account],
+        signers: &[Signer],
         block_hash: &CryptoHash,
         client_sender: &ClientSender,
     ) -> bool {
@@ -137,17 +138,24 @@ impl TxGenerator {
         let sender = &accounts[idx.index(0)];
         let nonce = sender.nonce.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         let sender_id = sender.id.clone();
-        let signer = sender.as_signer();
+        let signer = signers[idx.index(0)].clone();
 
         let receiver = &accounts[idx.index(1)];
-        let transaction = SignedTransaction::send_money(
-            nonce,
-            sender_id,
-            receiver.id.clone(),
-            &signer,
-            AMOUNT,
-            *block_hash,
-        );
+
+        let block_hash = block_hash.clone();
+        let receiver_id = receiver.id.clone();
+        let transaction = tokio::task::spawn_blocking(move || {
+            SignedTransaction::send_money(
+                nonce,
+                sender_id,
+                receiver_id,
+                &signer,
+                AMOUNT,
+                block_hash,
+            )
+        })
+        .await
+        .expect("failed to create transaction");
 
         match client_sender
             .tx_request_sender
@@ -176,6 +184,18 @@ impl TxGenerator {
         view_client_sender: ViewClientSender,
         runner_state: RunnerState,
     ) -> anyhow::Result<Vec<task::JoinHandle<()>>> {
+        let wait_file = "/tmp/tx_generator_wait";
+        let wait_dur = Duration::from_millis(1000);
+        // XXX: hack
+        // Check if the file exists, then busy wait
+        while std::path::Path::new(wait_file).exists() {
+            tracing::info!(target: "transaction-generator",
+                ?wait_file,
+                "Waiting for the file to be removed",
+            );
+            std::thread::sleep(wait_dur);
+        }
+
         // TODO(slavas): generate accounts on the fly?
         let mut accounts = account::accounts_from_path(&config.accounts_path)?;
         if accounts.is_empty() {
@@ -224,6 +244,7 @@ impl TxGenerator {
                     }
                 }
                 let accounts = rx.recv().await.unwrap();
+                let signers = accounts.iter().map(|a| a.as_signer()).collect::<Vec<_>>();
 
                 let block_hash = runner_state.block_hash.clone();
                 loop {
@@ -232,10 +253,21 @@ impl TxGenerator {
                     let ok = Self::generate_send_transaction(
                         &mut rnd,
                         &accounts,
+                        &signers,
                         &block_hash,
                         &client_sender,
                     )
                     .await;
+
+                    // XXX: hack
+                    // Check if the file exists, then busy wait
+                    while std::path::Path::new(wait_file).exists() {
+                        tracing::info!(target: "transaction-generator",
+                            ?wait_file,
+                            "Waiting for the file to be removed",
+                        );
+                        std::thread::sleep(wait_dur);
+                    }
 
                     let mut stats = runner_state.stats.lock();
                     if ok {

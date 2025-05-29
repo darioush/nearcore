@@ -332,6 +332,7 @@ proc-macro2 = "1.0.64"
 prometheus = { version = "0.13.1", default-features = false }
 protobuf = "3.0.1"
 protobuf-codegen = "3.0.1"
+pprof = { version = "0.14", features = ["flamegraph", "protobuf"] }
 quote = "1.0"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
@@ -450,7 +451,9 @@ codegen-units = 1
 inherits = "release"
 lto = false
 codegen-units = 16
-debug-assertions = true
+debug-assertions = false 
+debug = true
+split-debuginfo = 'unpacked'  # optional, macOS-friendly
 
 # Used for fuzzing, LTO is ill-supported as of 2023-09 and so should not be enabled.
 [profile.fuzz]

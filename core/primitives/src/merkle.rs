@@ -44,66 +44,99 @@ pub fn combine_hash(hash1: &MerkleHash, hash2: &MerkleHash) -> MerkleHash {
 }
 
 /// Merklize an array of items. If the array is empty, returns hash of 0
-pub fn merklize<T: BorshSerialize>(arr: &[T]) -> (MerkleHash, Vec<MerklePath>) {
-    if arr.is_empty() {
+pub fn merklize<T, I>(items: I) -> (MerkleHash, Vec<MerklePath>)
+where
+    T: BorshSerialize,
+    I: IntoIterator<Item = T>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let iter = items.into_iter();
+    let items_len = iter.len();
+
+    if items_len == 0 {
         return (MerkleHash::default(), vec![]);
     }
-    let mut len = arr.len().next_power_of_two();
-    let mut hashes = arr.iter().map(CryptoHash::hash_borsh).collect::<Vec<_>>();
+    let mut len = items_len.next_power_of_two();
+    let mut hashes = iter.map(CryptoHash::hash_borsh).collect::<Vec<_>>();
 
     // degenerate case
     if len == 1 {
         return (hashes[0], vec![vec![]]);
     }
-    let mut arr_len = arr.len();
-    let mut paths: Vec<MerklePath> = (0..arr_len)
-        .map(|i| {
-            if i % 2 == 0 {
-                if i + 1 < arr_len {
-                    vec![MerklePathItem {
-                        hash: hashes[(i + 1) as usize],
-                        direction: Direction::Right,
-                    }]
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![MerklePathItem { hash: hashes[(i - 1) as usize], direction: Direction::Left }]
-            }
-        })
-        .collect();
+    let mut arr_len = items_len;
+
+    // Improved (with capacity reservation):
+    let mut paths: Vec<MerklePath> = Vec::with_capacity(items_len);
+    for i in 0..arr_len {
+        let mut path = if i % 2 == 0 && i + 1 < arr_len {
+            // Preallocate with expected capacity based on tree height
+            Vec::with_capacity(items_len.next_power_of_two().trailing_zeros() as usize)
+        } else if i % 2 == 1 {
+            Vec::with_capacity(items_len.next_power_of_two().trailing_zeros() as usize)
+        } else {
+            Vec::new()
+        };
+
+        if i % 2 == 0 && i + 1 < arr_len {
+            path.push(MerklePathItem {
+                hash: hashes[(i + 1) as usize],
+                direction: Direction::Right,
+            });
+        } else if i % 2 == 1 {
+            path.push(MerklePathItem {
+                hash: hashes[(i - 1) as usize],
+                direction: Direction::Left,
+            });
+        }
+
+        paths.push(path);
+    }
 
     let mut counter = 1;
     while len > 1 {
         len /= 2;
         counter *= 2;
+
+        // Separate hash computation from path updates
         for i in 0..len {
-            let hash = if 2 * i >= arr_len {
+            if 2 * i >= arr_len {
                 continue;
-            } else if 2 * i + 1 >= arr_len {
+            }
+
+            let hash = if 2 * i + 1 >= arr_len {
                 hashes[2 * i]
             } else {
                 combine_hash(&hashes[2 * i], &hashes[2 * i + 1])
             };
             hashes[i] = hash;
-            if len > 1 {
-                if i % 2 == 0 {
-                    for j in 0..counter {
-                        let index = ((i + 1) * counter + j) as usize;
-                        if index < arr.len() {
-                            paths[index].push(MerklePathItem { hash, direction: Direction::Left });
-                        }
-                    }
+        }
+
+        // Only update paths if needed
+        if len > 1 {
+            for i in 0..len {
+                if 2 * i >= arr_len {
+                    continue;
+                }
+
+                let hash = hashes[i];
+                let is_even = (i & 1) == 0;
+
+                let (start_index, direction) = if is_even {
+                    ((i + 1) * counter, Direction::Left)
                 } else {
-                    for j in 0..counter {
-                        let index = ((i - 1) * counter + j) as usize;
-                        if index < arr.len() {
-                            paths[index].push(MerklePathItem { hash, direction: Direction::Right });
-                        }
+                    ((i - 1) * counter, Direction::Right)
+                };
+
+                // Optimize inner loop with batch updates if possible
+                for j in 0..counter {
+                    let index = (start_index + j) as usize;
+                    if index < items_len {
+                        paths[index].push(MerklePathItem { hash, direction: direction.clone() });
                     }
                 }
             }
         }
+
         arr_len = (arr_len + 1) / 2;
     }
     (hashes[0], paths)

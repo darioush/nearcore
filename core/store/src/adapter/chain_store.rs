@@ -3,6 +3,7 @@ use crate::{
     CHUNK_TAIL_KEY, DBCol, FINAL_HEAD_KEY, FORK_TAIL_KEY, HEAD_KEY, HEADER_HEAD_KEY,
     LARGEST_TARGET_HEIGHT_KEY, Store, StoreUpdate, TAIL_KEY, get_genesis_height,
 };
+use near_cache::SyncLruCache;
 use near_chain_primitives::Error;
 use near_primitives::block::{Block, BlockHeader, Tip};
 use near_primitives::chunk_apply_stats::ChunkApplyStats;
@@ -28,6 +29,8 @@ pub struct ChainStoreAdapter {
     store: Store,
     /// Genesis block height.
     genesis_height: BlockHeight,
+    /// Cache for block headers to avoid frequent database lookups
+    block_header_cache: Arc<SyncLruCache<CryptoHash, BlockHeader>>,
 }
 
 impl StoreAdapter for ChainStoreAdapter {
@@ -41,7 +44,8 @@ impl ChainStoreAdapter {
         let genesis_height = get_genesis_height(&store)
             .expect("Store failed on fetching genesis height")
             .expect("Genesis height not found in storage");
-        Self { store, genesis_height }
+        // Using a reasonable cache size for block headers
+        Self { store, genesis_height, block_header_cache: Arc::new(SyncLruCache::new(1000)) }
     }
 
     pub fn store_update(&self) -> ChainStoreUpdateAdapter<'static> {
@@ -134,10 +138,21 @@ impl ChainStoreAdapter {
 
     /// Get block header.
     pub fn get_block_header(&self, h: &CryptoHash) -> Result<BlockHeader, Error> {
-        option_to_not_found(
+        // Try to get the block header from the cache first
+        if let Some(header) = self.block_header_cache.get(h) {
+            return Ok(header);
+        }
+
+        // If not in cache, get from the database
+        let header: BlockHeader = option_to_not_found(
             self.store.get_ser(DBCol::BlockHeader, h.as_ref()),
             format_args!("BLOCK HEADER: {}", h),
-        )
+        )?;
+
+        // Store the header in the cache for future use
+        self.block_header_cache.put(*h, header.clone());
+
+        Ok(header)
     }
 
     /// Get block height.

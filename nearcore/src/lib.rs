@@ -41,6 +41,7 @@ use near_primitives::types::EpochId;
 use near_store::db::metadata::DbKind;
 use near_store::genesis::initialize_sharded_genesis_state;
 use near_store::metrics::spawn_db_metrics_loop;
+use near_store::test_utils::create_test_node_storage_default;
 use near_store::{NodeStorage, Store, StoreOpenerError};
 use near_telemetry::TelemetryActor;
 use std::path::{Path, PathBuf};
@@ -246,7 +247,14 @@ pub fn start_with_config_and_synchronization(
     shutdown_signal: Option<broadcast::Sender<()>>,
     config_updater: Option<ConfigUpdater>,
 ) -> anyhow::Result<NearNode> {
-    let storage = open_storage(home_dir, &mut config)?;
+    // XXX: Check environment variable "NEAR_MEMDB"
+    let storage = if let Ok(_) = std::env::var("NEAR_MEMDB") {
+        tracing::warn!("NEAR_MEMDB is set, using in-memory storage");
+        create_test_node_storage_default()
+    } else {
+        open_storage(home_dir, &mut config)?
+    };
+
     let db_metrics_arbiter = if config.client_config.enable_statistics_export {
         let period = config.client_config.log_summary_period;
         let db_metrics_arbiter_handle = spawn_db_metrics_loop(&storage, period)?;

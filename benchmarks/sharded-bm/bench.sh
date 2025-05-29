@@ -3,6 +3,7 @@
 # cspell:word benchnet mpstat tonumber
 
 set -o errexit
+#set -x
 
 CASE="${CASE:-$2}"
 BM_PARAMS=${CASE}/params.json
@@ -61,16 +62,11 @@ EPOCH_LENGTH=$(jq -r '.epoch_length // 1000' ${BASE_GENESIS_PATCH})
 echo "Test case: ${CASE}"
 echo "Num nodes: ${NUM_NODES}"
 
-if [ "${NUM_NODES}" -eq "1" ]; then
-    NUM_SHARDS=$(jq '.shard_layout.V2.shard_ids | length' ${GENESIS} 2>/dev/null) || true
-    VALIDATOR_KEY=${NEAR_HOME}/validator_key.json
-else
     for i in $(seq 0 $((NUM_NODES - 1))); do
         NEAR_HOMES+=("${BENCHNET_DIR}/node${i}")
     done
     NUM_SHARDS=$(jq '.shard_layout.V2.shard_ids | length' ${NEAR_HOMES[0]}/genesis.json 2>/dev/null) || true
     VALIDATOR_KEY=${NEAR_HOMES[0]}/validator_key.json
-fi
 
 if [ "${RUN_ON_FORKNET}" = true ]; then
     if [ -z "${FORKNET_NAME}" ] || [ -z "${FORKNET_START_HEIGHT}" ]; then
@@ -126,16 +122,12 @@ start_neard0() {
 }
 
 start_nodes_local() {
-    if [ "${NUM_NODES}" -eq "1" ]; then
-        sudo systemctl start neard
-    else
         mkdir -p ${LOG_DIR}
         for node in "${NEAR_HOMES[@]}"; do
             log="${LOG_DIR}/$(basename ${node})"
             echo "Starting node: ${node}, log: ${log}"
             nohup ${NEARD} --home ${node} run &>${log} &
         done
-    fi
 }
 
 start_nodes() {
@@ -155,11 +147,7 @@ stop_nodes_forknet() {
 }
 
 stop_nodes_local() {
-    if [ "${NUM_NODES}" -eq "1" ]; then
-        sudo systemctl stop neard
-    else
-        killall --wait neard || true
-    fi
+    (pkill neard || true) && while pgrep neard >/dev/null; do sleep 0.1; done
 }
 
 stop_nodes() {
@@ -187,11 +175,7 @@ reset_forknet() {
 }
 
 reset_local() {
-    if [ "${NUM_NODES}" -eq "1" ]; then
-        find ${NEAR_HOME}/data -mindepth 1 -delete
-    else
-        rm -rf ${BENCHNET_DIR}
-    fi
+    rm -rf ${BENCHNET_DIR}
     rm -rf ${USERS_DATA_DIR}
 }
 
@@ -355,13 +339,8 @@ init_forknet() {
 
 init_local() {
     reset
-    if [ "${NUM_NODES}" -eq "1" ]; then
-        rm -f ${CONFIG} ${GENESIS}
-        /${NEARD} --home ${NEAR_HOME} init --chain-id localnet
-    else
         /${NEARD} --home ${BENCHNET_DIR} localnet -v ${NUM_CHUNK_PRODUCERS} --non-validators-rpc ${NUM_RPCS} \
             --tracked-shards=none
-    fi
 }
 
 init() {
@@ -450,14 +429,6 @@ tweak_config_forknet_node() {
 }
 
 tweak_config_local() {
-    if [ "${NUM_NODES}" -eq "1" ]; then
-        edit_genesis ${GENESIS}
-        edit_config ${CONFIG}
-        edit_log_config ${LOG_CONFIG}
-        # Set single node RPC port to known value
-        jq --arg val "${RPC_ADDR}" \
-            '.rpc.addr |= $val' ${CONFIG} >tmp.$$.json && mv tmp.$$.json ${CONFIG} || rm tmp.$$.json
-    else
         for node in "${NEAR_HOMES[@]}"; do
             edit_genesis ${node}/genesis.json
             edit_config ${node}/config.json
@@ -467,17 +438,9 @@ tweak_config_local() {
         jq --arg val "${RPC_ADDR}" \
             '.rpc.addr |= $val' ${NEAR_HOMES[NUM_NODES - 1]}/config.json >tmp.$$.json && \
             mv tmp.$$.json ${NEAR_HOMES[NUM_NODES - 1]}/config.json || rm tmp.$$.json
-    fi
 
     if [ -d "${CASE}/epoch_configs" ]; then
         # Copy epoch_configs directory if it exists
-        if [ "${NUM_NODES}" -eq "1" ]; then
-            local protocol_version=$(jq -r '.protocol_version' ${GENESIS})
-            cp -r "${CASE}/epoch_configs" "${NEAR_HOME}/"
-            if [ -f "${NEAR_HOME}/epoch_configs/template.json" ]; then
-                mv "${NEAR_HOME}/epoch_configs/template.json" "${NEAR_HOME}/epoch_configs/${protocol_version}.json"
-            fi
-        else
             local protocol_version=$(jq -r '.protocol_version' ${NEAR_HOMES[0]}/genesis.json)
             for node in "${NEAR_HOMES[@]}"; do
                 cp -r "${CASE}/epoch_configs" "${node}/"
@@ -485,7 +448,6 @@ tweak_config_local() {
                     mv "${node}/epoch_configs/template.json" "${node}/epoch_configs/${protocol_version}.json"
                 fi
             done
-        fi
     fi
 }
 
@@ -628,22 +590,29 @@ native_transfers_local() {
 }
 
 native_transfers_injection() {
-    fetch_forknet_details
+    #fetch_forknet_details
     local tps=$(jq -r '.tx_generator.tps' ${BM_PARAMS})
     local volume=$(jq -r '.tx_generator.volume' ${BM_PARAMS})
-    local accounts_path="${BENCHNET_DIR}/${USERS_DATA_DIR}/shard.json"
+    # get .tx_generator.thread_count from params.json or default to 2
+    local thread_count=$(jq -r '.tx_generator.thread_count // 2' ${BM_PARAMS})
+    mkdir -p ${USERS_DATA_DIR}
+    local abs_path=$(cd "$USERS_DATA_DIR" && pwd)
+    local accounts_path="${abs_path}/shard${i}"
     cd ${PYTEST_PATH}
     # Create a glob pattern for the host filter
     host_filter=$(echo ${FORKNET_CP_NODES} | sed 's/ /|/g')
     
     # Update the CONFIG file on all chunk producer nodes
-    $MIRROR --host-filter ".*(${host_filter})" stop-nodes
-    $MIRROR --host-filter ".*(${host_filter})" run-cmd --cmd "jq --arg tps ${tps} \
+    #$MIRROR --host-filter ".*(${host_filter})" stop-nodes
+    for i in $(seq 0 $((NUM_NODES - 1))); do
+    local CONFIG="${NEAR_HOMES[$i]}/config.json"
+    jq --arg tps ${tps} \
         --arg volume ${volume} --arg accounts_path ${accounts_path} \
-        '.tx_generator = {\"tps\": ${tps}, \"volume\": ${volume}, \
-        \"accounts_path\": \"${accounts_path}\", \"thread_count\": 2}' ${CONFIG} > tmp.$$.json && \
-        mv tmp.$$.json ${CONFIG} || rm tmp.$$.json"
-    $MIRROR --host-filter ".*(${host_filter})" start-nodes
+        ".tx_generator = {\"tps\": ${tps}, \"volume\": ${volume}, \
+        \"accounts_path\": \"${accounts_path}\", \"thread_count\": ${thread_count}}" ${CONFIG} > tmp.$$.json && \
+        mv tmp.$$.json ${CONFIG} || rm tmp.$$.json
+    done
+    #$MIRROR --host-filter ".*(${host_filter})" start-nodes
 
     cd -
 }
@@ -680,10 +649,10 @@ monitor() {
     local old_processed=0
     local all_tps=()
 
+    date
     while true; do
-        date
-        local now=$(date +%s%3N)
-        local processed=$(curl -s localhost:3030/metrics | \
+        local now=$(gdate +%s%3N)
+        local processed=$(curl -s localhost:4040/metrics | \
             grep near_transaction_processed_successfully_total | \
             grep -v "#" | \
             awk '{ print $2 }')
@@ -708,7 +677,8 @@ monitor() {
 
         old_now=$now
         old_processed=$processed
-        mpstat 10 1 | grep -v Linux
+        #mpstat 10 1 | grep -v Linux
+        sleep 1
     done
 }
 

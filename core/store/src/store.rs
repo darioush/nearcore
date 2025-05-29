@@ -82,12 +82,33 @@ impl Store {
         column: DBCol,
         key: &[u8],
     ) -> io::Result<Option<T>> {
+        let _span = tracing::debug_span!(
+            target: "store",
+            "Store::get_ser",
+            db_op = "get",
+            // col = %column,
+            measure = "detail",
+            // key = %StorageKey(key),
+            // size = value.as_deref().map(<[u8]>::len)
+        )
+        .entered();
         if let Some(anything) = self.storage.get_anything(column, key)? {
+            if anything.arc_type_id() == std::any::TypeId::of::<T>() {
+                //eprintln!("Handled get Arc<T> in Store::get_ser for column: {column:?}");
+                return Ok(anything.as_arc_any().downcast_ref::<T>().cloned());
+            }
+            if anything.type_id() == std::any::TypeId::of::<Arc<T>>() {
+                //eprintln!("Handled stored Arc<T> in Store::get_ser for column: {column:?}");
+                let arc = anything.as_any().downcast_ref::<Arc<T>>().cloned();
+                return Ok(arc.map(|a| (*a).clone()));
+            }
             if anything.type_id() != std::any::TypeId::of::<T>() {
                 panic!(
-                    "Type mismatch: expected {}, got {:?}",
+                    "Type mismatch for column {}: expected {}, got {:?} {}",
+                    column,
                     std::any::type_name::<T>(),
                     anything.type_id(),
+                    anything.type_name(),
                 );
             }
             let cloned = anything.as_any().downcast_ref::<T>().cloned();
@@ -276,12 +297,14 @@ impl StoreUpdate {
     /// `CryptoHash` as key, which has the data in a small fixed-sized array.
     /// Copying and allocating that is not prohibitively expensive and we have
     /// to do it either way. Thus, we take a slice for the key for the nice API.
-    pub fn insert_ser<T: BorshSerialize + Clone + 'static + Send>(
+    pub fn insert_ser<T: BorshSerialize + Clone + 'static + Sync + Send>(
         &mut self,
         column: DBCol,
         key: &[u8],
         value: &T,
     ) -> io::Result<()> {
+        //return self.insert_ser_no_clone(column, key, value);
+
         assert!(column.is_insert_only(), "can't insert_ser: {column}");
         let data = borsh::to_vec(&value)?;
         self.transaction.insert_anything(column, key.to_vec(), data, value.clone());
@@ -366,12 +389,14 @@ impl StoreUpdate {
     ///
     /// Must not be used for reference-counted columns; use
     /// ['Self::increment_refcount'] or [`Self::decrement_refcount`] instead.
-    pub fn set_ser<T: BorshSerialize + ?Sized + Clone + 'static + Send>(
+    pub fn set_ser<T: BorshSerialize + ?Sized + Clone + 'static + Sync + Send>(
         &mut self,
         column: DBCol,
         key: &[u8],
         value: &T,
     ) -> io::Result<()> {
+        //return self.set_ser_no_clone(column, key, value);
+
         assert!(!(column.is_rc() || column.is_insert_only()), "can't set_ser: {column}");
         let data = borsh::to_vec(&value)?;
         self.transaction.set_anything(column, key.to_vec(), data, value.clone());
@@ -550,16 +575,17 @@ impl StoreUpdate {
         }
 
         let transaction = self.transaction;
-        let (tx, bg_tx) = Self::split_transaction(transaction);
-        if bg_tx.ops.len() > 0 {
-            let storage = self.store.storage.clone();
-            // self.store.storage.write_bg(bg_tx, storage)?;
-            std::thread::spawn(move || {
-                let _span =
-                    tracing::debug_span!(target: "store", "StoreUpdate::commit_bg", measure="detail").entered();
-                storage.write(bg_tx).unwrap();
-            });
-        }
+        //let (tx, _bg_tx) = Self::split_transaction(transaction);
+        //if bg_tx.ops.len() > 0 {
+        //    let storage = self.store.storage.clone();
+        //    // self.store.storage.write_bg(bg_tx, storage)?;
+        //    std::thread::spawn(move || {
+        //        let _span =
+        //            tracing::debug_span!(target: "store", "StoreUpdate::commit_bg", measure="detail").entered();
+        //        storage.write(bg_tx).unwrap();
+        //    });
+        //}
+        let tx = transaction;
         self.store.storage.write(tx)
     }
 
@@ -568,9 +594,9 @@ impl StoreUpdate {
         let mut bg_transaction = DBTransaction::new();
 
         for op in tx.ops {
-            if op.col() == DBCol::TransactionResultForBlock {
-                continue;
-            }
+            //if op.col() == DBCol::TransactionResultForBlock {
+            //    continue;
+            //}
             if BG_COLS.contains(&op.col()) {
                 bg_transaction.ops.push(op);
             } else {
