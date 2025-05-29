@@ -1730,7 +1730,7 @@ impl<'a> ChainStoreUpdate<'a> {
         value: &mut Option<T>,
     ) -> Result<(), Error> {
         if let Some(t) = value.take() {
-            store_update.set_ser(DBCol::BlockMisc, key, &t)?;
+            store_update.set_ser_no_clone(DBCol::BlockMisc, key, &t)?;
         }
         Ok(())
     }
@@ -1939,7 +1939,7 @@ impl<'a> ChainStoreUpdate<'a> {
                 store_update.set_ser(
                     DBCol::OutcomeIds,
                     &get_block_shard_id(block_hash, *shard_id),
-                    &ids,
+                    ids,
                 )?;
             }
         }

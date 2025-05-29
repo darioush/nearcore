@@ -320,7 +320,19 @@ impl StoreUpdate {
     ///
     /// Must not be used for reference-counted columns; use
     /// ['Self::increment_refcount'] or [`Self::decrement_refcount`] instead.
-    pub fn set_ser<T: BorshSerialize + ?Sized>(
+    pub fn set_ser<T: BorshSerialize + ?Sized + Clone + 'static>(
+        &mut self,
+        column: DBCol,
+        key: &[u8],
+        value: &T,
+    ) -> io::Result<()> {
+        assert!(!(column.is_rc() || column.is_insert_only()), "can't set_ser: {column}");
+        let data = borsh::to_vec(&value)?;
+        self.set(column, key, &data);
+        Ok(())
+    }
+
+    pub fn set_ser_no_clone<T: BorshSerialize + ?Sized>(
         &mut self,
         column: DBCol,
         key: &[u8],
