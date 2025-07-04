@@ -4268,6 +4268,7 @@ dependencies = [
  "borsh",
  "bytesize",
  "chrono",
+ "criterion",
  "crossbeam-channel",
  "easy-ext",
  "enum-map",
