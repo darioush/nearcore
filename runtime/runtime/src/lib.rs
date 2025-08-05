@@ -24,7 +24,7 @@ use global_contracts::{
 use itertools::Itertools;
 use metrics::ApplyMetrics;
 pub use near_crypto;
-use near_crypto::PublicKey;
+use near_crypto::{PublicKey, Signature};
 use near_parameters::{ActionCosts, RuntimeConfig};
 pub use near_primitives;
 use near_primitives::account::{AccessKey, Account};
@@ -1780,7 +1780,74 @@ impl Runtime {
         let apply_state = &mut processing_state.apply_state;
         let state_update = &mut processing_state.state_update;
 
-        let tx_vec = signed_txs.into_nonexpired_transactions();
+        let mut tx_vec = signed_txs.into_nonexpired_transactions();
+
+        const TX_BATCH_SIZE: usize = 256;
+        // Divide tx_vec into batches by TX_BATCH_SIZE, and use rayon to process them in parallel.
+        tx_vec.par_chunks_mut(TX_BATCH_SIZE).for_each(|batch| {
+            // Collect all signatues into &[&ed25519::Signature] for batch verification.
+            let signatures: Vec<&ed25519_dalek::Signature> = batch
+                .iter()
+                .filter_map(|tx| match &tx.signature {
+                    Signature::ED25519(sig) => Some(sig),
+                    _ => None,
+                })
+                .collect();
+            if signatures.len() != batch.len() {
+                tracing::debug!(
+                    target: "batch_signature_verification",
+                    txs = %batch.len(),
+                    "Some signatures not ED25519, skipping batch verification",
+                );
+                return;
+            }
+
+            // Collect &[ed25519_dalek::VerifyingKey] for batch verification.
+            let verifying_keys: Vec<ed25519_dalek::VerifyingKey> = batch
+                .iter()
+                .filter_map(|tx| match &tx.transaction.public_key() {
+                    PublicKey::ED25519(key) => {
+                        match ed25519_dalek::VerifyingKey::from_bytes(&key.0) {
+                            Ok(verifying_key) => Some(verifying_key),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            // Signer key should match the verifying key type.
+            assert_eq!(
+                verifying_keys.len(),
+                signatures.len(),
+                "Mismatch in number of signatures and verifying keys"
+            );
+
+            // Collect signed_tx.get_hash().as_ref() as &[&[u8]] for batch verification.
+            let hashes: Vec<CryptoHash> = batch.iter().map(|tx| tx.get_hash()).collect();
+            let messages = hashes.iter().map(|hash| hash.as_ref()).collect::<Vec<_>>();
+
+            if let Err(_) =
+                ed25519_dalek::safe_verify_batch(&messages, &signatures, &verifying_keys)
+            {
+                tracing::debug!(
+                    target: "batch_signature_verification",
+                    txs = %batch.len(),
+                    "Batch signature verification failed",
+                );
+                return;
+            }
+
+            tracing::debug!(
+                target: "batch_signature_verification",
+                txs = %batch.len(),
+                "Batch signature verification succeeded",
+            );
+            // Entire batch is valid, so we can mark all transactions as pre-verified.
+            for tx in batch {
+                tx.pre_verified = true;
+            }
+        });
+
         let tx_batches = TransactionBatches::new(&tx_vec);
 
         let batch_outputs = tx_batches
