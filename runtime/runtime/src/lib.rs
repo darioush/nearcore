@@ -1782,7 +1782,7 @@ impl Runtime {
 
         let mut tx_vec = signed_txs.into_nonexpired_transactions();
 
-        const TX_BATCH_SIZE: usize = 256;
+        const TX_BATCH_SIZE: usize = 1024;
         // Divide tx_vec into batches by TX_BATCH_SIZE, and use rayon to process them in parallel.
         tx_vec.par_chunks_mut(TX_BATCH_SIZE).for_each(|batch| {
             // Collect all signatues into &[&ed25519::Signature] for batch verification.
@@ -1847,6 +1847,8 @@ impl Runtime {
                 tx.pre_verified = true;
             }
         });
+        let num_pre_verified = tx_vec.iter().filter(|tx| tx.pre_verified).count();
+        eprintln!("Pre-verified {} out of {} transactions", num_pre_verified, tx_vec.len());
 
         let tx_batches = TransactionBatches::new(&tx_vec);
 
