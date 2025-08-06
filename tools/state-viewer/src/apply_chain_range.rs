@@ -2,16 +2,18 @@ use crate::cli::{ApplyRangeMode, StorageSource};
 use crate::commands::{maybe_print_db_stats, maybe_save_trie_changes};
 use crate::progress_reporter::ProgressReporter;
 use core::panic;
+use near_async::futures::AsyncComputationSpawnerExt;
 use near_chain::chain::collect_receipts_from_response;
 use near_chain::types::{
     ApplyChunkBlockContext, ApplyChunkResult, ApplyChunkShardContext, RuntimeAdapter,
     RuntimeStorageConfig, StorageDataSource,
 };
 use near_chain::{
-    Block, ChainStore, ChainStoreAccess, ChainStoreUpdate, ReceiptFilter,
+    ApplyChunksSpawner, Block, ChainStore, ChainStoreAccess, ChainStoreUpdate, ReceiptFilter,
     get_incoming_receipts_for_shard,
 };
 use near_chain_configs::Genesis;
+use near_client::{ProcessingDoneTracker, ProcessingDoneWaiter};
 use near_epoch_manager::shard_assignment::{shard_id_to_index, shard_id_to_uid};
 use near_epoch_manager::{EpochManagerAdapter, EpochManagerHandle};
 use near_primitives::apply::ApplyChunkReason;
@@ -36,7 +38,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::span::EnteredSpan;
 
@@ -805,13 +807,16 @@ fn benchmark_chunk_application(
     println!("");
 
     let mut total_chunk_application_time: Duration = Duration::ZERO;
-    let mut total_gas_burned: u128 = 0;
+
+    let total_gas_burned = Arc::new(AtomicU64::new(0));
+
     let report_interval = Duration::from_secs(1);
     let mut last_report_time = Instant::now();
 
-    for i in 1.. {
-        let cur_input = input.clone();
+    let num_threads = 5;
+    let pool = ApplyChunksSpawner::default().into_spawner(num_threads);
 
+    for i in 1.. {
         let _span = tracing::debug_span!(
             target: "state_viewer",
             parent: &parent_span,
@@ -819,10 +824,27 @@ fn benchmark_chunk_application(
             height)
         .entered();
 
+        let mut processing_done_waiters: Vec<ProcessingDoneWaiter> = Vec::new();
+        // Copy cur_inputs num_threads times to allow parallel processing.
+        // Don't need to count this as application time.
+        let inputs = vec![input.clone(); num_threads];
+
         let chunk_application_start_time = Instant::now();
-        let apply_result = apply_chunk_from_input(cur_input, &*runtime_adapter);
+        for (_i, cur_input) in inputs.into_iter().enumerate() {
+            let tracker = ProcessingDoneTracker::new();
+            let runtime_adapter = runtime_adapter.clone();
+            let total_gas_burned = total_gas_burned.clone();
+            processing_done_waiters.push(tracker.make_waiter());
+            pool.spawn("apply_chunks", move || {
+                let apply_result = apply_chunk_from_input(cur_input, &*runtime_adapter);
+                total_gas_burned.fetch_add(apply_result.total_gas_burnt, Ordering::Relaxed);
+            });
+        }
+        for waiter in processing_done_waiters {
+            waiter.wait();
+        }
+
         total_chunk_application_time += chunk_application_start_time.elapsed();
-        total_gas_burned += apply_result.total_gas_burnt as u128;
 
         if i == 1 || last_report_time.elapsed() >= report_interval {
             println!(
@@ -830,7 +852,7 @@ fn benchmark_chunk_application(
                 i,
                 total_chunk_application_time.as_secs_f64() * 1000.0 / i as f64,
                 i as f64 / total_chunk_application_time.as_secs_f64(),
-                total_gas_burned as f64 / 1_000_000_000_000.0 / i as f64
+                total_gas_burned.load(Ordering::Relaxed) as f64 / 1_000_000_000_000.0 / i as f64
             );
             last_report_time = std::time::Instant::now();
         }

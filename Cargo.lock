@@ -8232,6 +8232,7 @@ dependencies = [
  "indicatif",
  "insta",
  "itertools 0.12.1",
+ "near-async",
  "near-chain",
  "near-chain-configs",
  "near-chain-primitives",
