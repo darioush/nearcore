@@ -23,7 +23,6 @@ use near_store::{
     StorageError, TrieUpdate, get_access_key, get_account, set_access_key, set_account,
 };
 use near_vm_runner::logic::LimitConfig;
-use num_traits::sign;
 
 pub const ZERO_BALANCE_ACCOUNT_STORAGE_LIMIT: StorageUsage = 770;
 
