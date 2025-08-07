@@ -1853,7 +1853,7 @@ impl Runtime {
                 tx.pre_verified = true;
             }
             SIGNATURE_VERIFY_BATCH_TOTAL.inc();
-            SIGNATURE_VERIFY_SECONDS_TOTAL.inc_by(start.elapsed().as_secs_f64());
+            SIGNATURE_VERIFY_BATCH_SECONDS_TOTAL.inc_by(start.elapsed().as_secs_f64());
         });
 
         // Static variable to see how long ago we printed out the information.
