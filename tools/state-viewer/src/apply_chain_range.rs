@@ -836,6 +836,7 @@ fn benchmark_chunk_application(
             let total_gas_burned = total_gas_burned.clone();
             processing_done_waiters.push(tracker.make_waiter());
             pool.spawn("apply_chunks", move || {
+                let _tracker = tracker;
                 let apply_result = apply_chunk_from_input(cur_input, &*runtime_adapter);
                 total_gas_burned.fetch_add(apply_result.total_gas_burnt, Ordering::Relaxed);
             });
