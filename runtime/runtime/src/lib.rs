@@ -1847,8 +1847,8 @@ impl Runtime {
                 tx.pre_verified = true;
             }
         });
-        let num_pre_verified = tx_vec.iter().filter(|tx| tx.pre_verified).count();
-        eprintln!("Pre-verified {} out of {} transactions", num_pre_verified, tx_vec.len());
+        //let num_pre_verified = tx_vec.iter().filter(|tx| tx.pre_verified).count();
+        //eprintln!("Pre-verified {} out of {} transactions", num_pre_verified, tx_vec.len());
 
         let tx_batches = TransactionBatches::new(&tx_vec);
 
