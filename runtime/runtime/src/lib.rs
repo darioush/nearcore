@@ -1832,12 +1832,13 @@ impl Runtime {
             let hashes: Vec<CryptoHash> = batch.iter().map(|tx| tx.get_hash()).collect();
             let messages = hashes.iter().map(|hash| hash.as_ref()).collect::<Vec<_>>();
 
+            let batch_len = batch.len();
             if let Err(_) =
                 ed25519_dalek::safe_verify_batch(&messages, &signatures, &verifying_keys)
             {
                 tracing::debug!(
                     target: "batch_signature_verification",
-                    txs = %batch.len(),
+                    txs = %batch_len,
                     "Batch signature verification failed",
                 );
                 return;
@@ -1845,14 +1846,14 @@ impl Runtime {
 
             tracing::debug!(
                 target: "batch_signature_verification",
-                txs = %batch.len(),
+                txs = %batch_len,
                 "Batch signature verification succeeded",
             );
             // Entire batch is valid, so we can mark all transactions as pre-verified.
             for tx in batch {
                 tx.pre_verified = true;
             }
-            SIGNATURE_VERIFY_BATCH_TOTAL.inc();
+            SIGNATURE_VERIFY_BATCH_TOTAL.inc_by(batch_len as u64);
             SIGNATURE_VERIFY_BATCH_SECONDS_TOTAL.inc_by(start.elapsed().as_secs_f64());
         });
 
