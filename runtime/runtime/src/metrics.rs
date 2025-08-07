@@ -39,6 +39,38 @@ pub static TRANSACTION_PROCESSED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| 
     .unwrap()
 });
 
+pub static SIGNATURE_VERIFY_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    try_create_int_counter(
+        "near_signature_verify_total",
+        "The number of signatures verified since starting this node",
+    )
+    .unwrap()
+});
+
+pub static SIGNATURE_VERIFY_SECONDS_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
+    try_create_counter(
+        "near_signature_verify_seconds_total",
+        "The time spent on verifying signatures since starting this node",
+    )
+    .unwrap()
+});
+
+pub static SIGNATURE_VERIFY_BATCH_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    try_create_int_counter(
+        "near_signature_verify_batch_total",
+        "The number of batches of signatures verified since starting this node",
+    )
+    .unwrap()
+});
+
+pub static SIGNATURE_VERIFY_BATCH_SECONDS_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
+    try_create_counter(
+        "near_signature_verify_batch_seconds_total",
+        "The time spent on verifying batches of signatures since starting this node",
+    )
+    .unwrap()
+});
+
 pub static INCOMING_RECEIPT_PROCESSED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     try_create_int_counter_vec(
         "near_incoming_receipt_processed_total",

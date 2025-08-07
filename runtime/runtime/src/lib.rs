@@ -6,6 +6,10 @@ use crate::config::{
     total_prepaid_exec_fees, total_prepaid_gas,
 };
 use crate::congestion_control::DelayedReceiptQueueWrapper;
+use crate::metrics::{
+    SIGNATURE_VERIFY_BATCH_SECONDS_TOTAL, SIGNATURE_VERIFY_BATCH_TOTAL,
+    SIGNATURE_VERIFY_SECONDS_TOTAL, SIGNATURE_VERIFY_TOTAL,
+};
 use crate::prefetch::TriePrefetcher;
 pub use crate::types::SignedValidPeriodTransactions;
 use crate::verifier::{StorageStakingError, check_storage_stake, validate_receipt};
@@ -80,6 +84,7 @@ use std::cmp::max;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, instrument};
 use verifier::ValidateReceiptMode;
 
@@ -1785,6 +1790,7 @@ impl Runtime {
         const TX_BATCH_SIZE: usize = 1024;
         // Divide tx_vec into batches by TX_BATCH_SIZE, and use rayon to process them in parallel.
         tx_vec.par_chunks_mut(TX_BATCH_SIZE).for_each(|batch| {
+            let start = Instant::now();
             // Collect all signatues into &[&ed25519::Signature] for batch verification.
             let signatures: Vec<&ed25519_dalek::Signature> = batch
                 .iter()
@@ -1846,9 +1852,34 @@ impl Runtime {
             for tx in batch {
                 tx.pre_verified = true;
             }
+            SIGNATURE_VERIFY_BATCH_TOTAL.inc();
+            SIGNATURE_VERIFY_SECONDS_TOTAL.inc_by(start.elapsed().as_secs_f64());
         });
-        //let num_pre_verified = tx_vec.iter().filter(|tx| tx.pre_verified).count();
-        //eprintln!("Pre-verified {} out of {} transactions", num_pre_verified, tx_vec.len());
+
+        // Static variable to see how long ago we printed out the information.
+        // If we want to see how many transactions were pre-verified, we can uncomment the following lines.
+        static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        // If it's been more than 10 seconds since the last log, print out the number of pre-verified transactions.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+        if now - LAST_LOG.load(std::sync::atomic::Ordering::Relaxed) > 10 {
+            let num_pre_verified = tx_vec.iter().filter(|tx| tx.pre_verified).count();
+            eprintln!("Pre-verified {} out of {} transactions", num_pre_verified, tx_vec.len());
+
+            // Get values for metrics and print them.
+            eprintln!(
+                "verify batch: {} ({}s), verify total: {} ({}s)",
+                SIGNATURE_VERIFY_BATCH_TOTAL.get(),
+                SIGNATURE_VERIFY_BATCH_SECONDS_TOTAL.get(),
+                SIGNATURE_VERIFY_TOTAL.get(),
+                SIGNATURE_VERIFY_SECONDS_TOTAL.get()
+            );
+
+            LAST_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let tx_batches = TransactionBatches::new(&tx_vec);
 

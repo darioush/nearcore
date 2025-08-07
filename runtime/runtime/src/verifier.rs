@@ -1,5 +1,6 @@
 use crate::VerificationResult;
 use crate::config::{TransactionCost, total_prepaid_gas};
+use crate::metrics::{SIGNATURE_VERIFY_SECONDS_TOTAL, SIGNATURE_VERIFY_TOTAL};
 use crate::near_primitives::account::Account;
 use near_crypto::key_conversion::is_valid_staking_key;
 use near_parameters::RuntimeConfig;
@@ -22,6 +23,7 @@ use near_store::{
     StorageError, TrieUpdate, get_access_key, get_account, set_access_key, set_account,
 };
 use near_vm_runner::logic::LimitConfig;
+use num_traits::sign;
 
 pub const ZERO_BALANCE_ACCOUNT_STORAGE_LIMIT: StorageUsage = 770;
 
@@ -102,7 +104,14 @@ pub fn validate_transaction(
     ) {
         return Err((InvalidTxError::ActionsValidation(err), signed_tx));
     }
-    ValidatedTransaction::new(config, signed_tx)
+
+    if !signed_tx.pre_verified {
+        SIGNATURE_VERIFY_TOTAL.inc();
+    }
+    let start = std::time::Instant::now();
+    let tx = ValidatedTransaction::new(config, signed_tx);
+    SIGNATURE_VERIFY_SECONDS_TOTAL.inc_by(start.elapsed().as_secs_f64());
+    tx
 }
 
 /// Set new `signer` and `access_key` in `state_update`.
