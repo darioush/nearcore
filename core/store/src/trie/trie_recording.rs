@@ -103,6 +103,11 @@ impl TrieRecorder {
     /// Just like "record", but takes a function which returns the serialized node.
     /// Allows to avoid re-serializing the node when it has already been recorded.
     pub fn record_with(&self, hash: &CryptoHash, get_serialized_node: impl FnOnce() -> Arc<[u8]>) {
+        if self.recorded.get(hash).is_some() {
+            // XXX: This breaks resharding but for apply chunk it should be fine.
+            return;
+        }
+
         let mut size_from_first_insert: Option<usize> = None;
         self.recorded
             .entry(*hash)
