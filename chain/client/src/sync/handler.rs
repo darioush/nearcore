@@ -158,6 +158,7 @@ impl SyncHandler {
         }
 
         tracing::info!(target: "sync", "State sync: all shards are done");
+        panic!("Intentional panic for testing");
         let mut block_processing_artifacts = BlockProcessingArtifact::default();
 
         let reset_heads_result = chain.reset_heads_post_state_sync(
