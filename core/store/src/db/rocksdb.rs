@@ -401,7 +401,7 @@ impl Database for RocksDB {
         let write_batch_start = std::time::Instant::now();
         let batch = self.build_write_batch(transaction)?;
         let elapsed = write_batch_start.elapsed();
-        if elapsed.as_secs_f32() > 15 {
+        if elapsed.as_secs_f32() > 15.0 {
             tracing::warn!(
                 target = "store::db::rocksdb",
                 message = "making a write batch took a very long time, make smaller transactions!",
