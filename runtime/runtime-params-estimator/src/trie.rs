@@ -37,14 +37,14 @@ pub(crate) fn write_node(
         [b"1", b"2", b"3"]
             .iter()
             .cycle()
-            .map(|value| vec![tb.account_insert_key(signer.clone(), &key.as_bytes()[0..1], *value)])
+            .map(|value| vec![tb.account_has_key(signer.clone(), &key.as_str()[0..1])])
             .take(measured_iters + warmup_iters),
     );
     blocks.extend(
         [b"1", b"2", b"3"]
             .iter()
             .cycle()
-            .map(|value| vec![tb.account_insert_key(signer.clone(), key.as_bytes(), *value)])
+            .map(|value| vec![tb.account_has_key(signer.clone(), key.as_str())])
             .take(measured_iters + warmup_iters),
     );
     let results = &testbed.measure_blocks(blocks, block_latency)[1..];
@@ -63,6 +63,10 @@ pub(crate) fn write_node(
         - ext_cost_short_key[&ExtCosts::touching_trie_node];
     // The exact number of touched nodes is an implementation that we don't want
     // to test here but it should be close to 2*final_key_len
+    eprintln!(
+        "Nodes touched delta: {} (short key: {:?}, long key: {:?}) final_key_len: {}",
+        nodes_touched_delta, cost_short_key, cost_long_key, final_key_len
+    );
     assert!(nodes_touched_delta as usize <= 2 * final_key_len + 10);
     assert!(nodes_touched_delta as usize >= 2 * final_key_len - 10);
     let cost_delta =
@@ -248,6 +252,7 @@ fn read_node_from_accounting_cache_ext(
             let tb = testbed.transaction_builder();
             let signer = tb.random_account();
             let values_inserted = num_values * data_spread_factor;
+            eprintln!("Inserted {} values {}/{}", values_inserted, i, iters);
             let values: Vec<_> = (0..values_inserted)
                 .map(|_| {
                     let extension_key = crate::utils::random_vec(value_len);

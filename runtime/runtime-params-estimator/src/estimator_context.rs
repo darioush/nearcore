@@ -324,7 +324,8 @@ impl Testbed<'_> {
         caching_storage
     }
 
-    pub(crate) fn clear_caches(&self) {
+    pub(crate) fn clear_caches(&mut self) {
+        self.apply_state.trie_access_tracker_state = Default::default();
         // Flush out writes hanging in memtable
         self.tries.store().store().flush().unwrap();
 
@@ -511,12 +512,14 @@ impl Testbed<'_> {
         // will be at the same number.
         let tip_height = self.config.finality_lag;
         let tip = fs_fake_block_height_to_hash(tip_height as u64);
-        self.tries.get_trie_with_block_hash_for_shard(
+        let mut tries = self.tries.get_trie_with_block_hash_for_shard(
             ShardUId::single_shard(),
             self.root,
             &tip,
             false,
-        )
+        );
+        tries.set_use_trie_accounting_cache(true);
+        if self.config.recording { tries.recording_reads_new_recorder() } else { tries }
     }
 }
 

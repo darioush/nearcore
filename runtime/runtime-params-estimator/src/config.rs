@@ -46,4 +46,6 @@ pub struct Config {
     pub accurate: bool,
     /// If true, uses memtrie to access the state.
     pub memtrie: bool,
+    /// If true, trie accesses go through the recorder.
+    pub recording: bool,
 }

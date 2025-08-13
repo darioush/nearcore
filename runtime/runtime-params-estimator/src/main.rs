@@ -108,6 +108,9 @@ struct CliArgs {
     /// If true, uses memtrie to access the state.
     #[clap(long)]
     pub memtrie: bool,
+    /// If true, trie accesses go through the recorder.
+    #[clap(long)]
+    pub recording: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -303,6 +306,7 @@ fn run_estimation(cli_args: CliArgs) -> anyhow::Result<Option<CostTable>> {
         in_memory_db: cli_args.in_memory_db,
         accurate: cli_args.accurate,
         memtrie: cli_args.memtrie,
+        recording: cli_args.recording,
     };
     let cost_table = runtime_params_estimator::run(config);
     Ok(Some(cost_table))
@@ -552,6 +556,7 @@ mod tests {
             sub_cmd: None,
             accurate: true, // we run a small number of estimations, no need to take more shortcuts
             memtrie: false,
+            recording: false,
         };
         run_estimation(args).unwrap();
     }
