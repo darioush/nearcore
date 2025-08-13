@@ -37,14 +37,16 @@ pub(crate) fn write_node(
         [b"1", b"2", b"3"]
             .iter()
             .cycle()
-            .map(|value| vec![tb.account_has_key(signer.clone(), &key.as_str()[0..1])])
+            //.map(|value| vec![tb.account_has_key(signer.clone(), &key.as_str()[0..1])])
+            .map(|value| vec![tb.account_insert_key(signer.clone(), &key.as_bytes()[0..1], *value)])
             .take(measured_iters + warmup_iters),
     );
     blocks.extend(
         [b"1", b"2", b"3"]
             .iter()
             .cycle()
-            .map(|value| vec![tb.account_has_key(signer.clone(), key.as_str())])
+            //.map(|value| vec![tb.account_has_key(signer.clone(), key.as_str())])
+            .map(|value| vec![tb.account_insert_key(signer.clone(), &key.as_bytes(), *value)])
             .take(measured_iters + warmup_iters),
     );
     let results = &testbed.measure_blocks(blocks, block_latency)[1..];
