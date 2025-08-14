@@ -166,9 +166,9 @@ impl SyncHandler {
             apply_chunks_done_sender,
         );
         unwrap_and_report_state_sync_result!(reset_heads_result);
-        panic!("Intentional panic for testing");
         self.sync_status.update(SyncStatus::StateSyncDone);
 
+        tracing::info!(target: "sync", ?sync_hash, ?block_processing_artifacts, "State sync done");
         Some(SyncHandlerRequest::NeedProcessBlockArtifact(block_processing_artifacts))
     }
 
@@ -319,7 +319,7 @@ impl SyncHandler {
         needed_block_hashes.append(&mut extra_block_hashes);
         let mut blocks_to_request = vec![];
 
-        for hash in needed_block_hashes.clone() {
+        for hash in needed_block_hashes {
             let (request_block, have_block) =
                 self.sync_block_status(chain, &sync_hash, &hash, now)?;
             tracing::trace!(target: "sync", ?hash, ?request_block, ?have_block, "request_sync_blocks");

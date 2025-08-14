@@ -2522,6 +2522,7 @@ impl Chain {
         // We restored the state on height `shard_state_header.chunk.header.height_included`.
         // Now we should build a chain up to height of `sync_hash` block.
         loop {
+            tracing::info!(target: "sync", ?height, "set_state_finalize on height");
             height += 1;
             let mut chain_update = self.chain_update();
             // Result of successful execution of set_state_finalize_on_height is bool,
