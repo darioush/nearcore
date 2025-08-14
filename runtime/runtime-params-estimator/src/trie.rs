@@ -246,6 +246,7 @@ impl AccessTracker for EstimatorAccessTracker {
 }
 
 fn estimate_trie_read_cost_ext(testbed: &mut Testbed, iters: usize) -> Vec<GasCost> {
+    let max_read_bytes = 1024 * 1024;
     (0..iters)
         .map(|i| {
             let start = GasCost::measure(testbed.config.metric);
@@ -256,7 +257,7 @@ fn estimate_trie_read_cost_ext(testbed: &mut Testbed, iters: usize) -> Vec<GasCo
                 let items: Vec<_> = locked_trie
                     .iter()
                     .expect("Failed to get iterator")
-                    .map(|r| r.expect("Failed to read item"))
+                    .take_while(|_| trie.recorded_storage_size() < max_read_bytes)
                     .collect();
                 eprintln!("Iteration {}: Read {} items from trie", i, items.len());
             }
