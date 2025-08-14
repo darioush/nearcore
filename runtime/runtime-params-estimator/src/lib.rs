@@ -260,6 +260,7 @@ static ALL_COSTS: &[(Cost, fn(&mut EstimatorContext) -> GasCost)] = &[
     (Cost::StorageRemoveRetValueByte, storage_remove_ret_value_byte),
     (Cost::TouchingTrieNode, touching_trie_node),
     (Cost::ReadCachedTrieNode, read_cached_trie_node),
+    (Cost::EstimateTrieReadCost, estimate_trie_read_cost),
     (Cost::ApplyBlock, apply_block_cost),
     (Cost::ContractCompileBase, contract_compile_base),
     (Cost::ContractCompileBytes, contract_compile_bytes),
@@ -1298,6 +1299,18 @@ fn touching_trie_node_write(ctx: &mut EstimatorContext) -> GasCost {
 
     ctx.cached.touching_trie_node_write = Some(cost.clone());
     cost
+}
+
+fn estimate_trie_read_cost(ctx: &mut EstimatorContext) -> GasCost {
+    let warmup_iters = ctx.config.warmup_iters_per_block;
+    let iters = ctx.config.iter_per_block;
+    let mut testbed = ctx.testbed();
+
+    let results = (0..(warmup_iters + iters))
+        .map(|_| trie::estimate_trie_read_cost(&mut testbed))
+        .skip(warmup_iters)
+        .collect::<Vec<_>>();
+    average_cost(results)
 }
 
 fn read_cached_trie_node(ctx: &mut EstimatorContext) -> GasCost {

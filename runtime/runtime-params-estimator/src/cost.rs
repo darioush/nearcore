@@ -584,6 +584,8 @@ pub enum Cost {
     /// for this are a bit involved but roughly speaking, it just forces values
     /// out of CPU caches so that they are always read from memory.
     ReadCachedTrieNode,
+    /// TODO: ...
+    EstimateTrieReadCost,
     /// Estimates `promise_and_base` which is charged for every call to
     /// `promise_and`. This should cover the base cost for creating receipt
     /// dependencies.

@@ -77,6 +77,34 @@ pub(crate) fn write_node(
     cost
 }
 
+pub(crate) fn estimate_trie_read_cost(testbed: &mut Testbed) -> GasCost {
+    let debug = testbed.config.debug;
+    let iters = 5;
+    let percentiles_of_interest = &[0.5, 0.9, 0.99, 0.999];
+
+    let mut estimation = |debug_name: &'static str, iters: usize| {
+        let results = estimate_trie_read_cost_ext(testbed, iters);
+        let p_results = percentiles(results, percentiles_of_interest).collect::<Vec<_>>();
+        if debug {
+            eprint!("{:<32}", debug_name);
+            for cost in &p_results {
+                eprint!("{:>8} ", cost.to_gas() / 1_000_000);
+            }
+            eprintln!();
+        }
+        p_results
+    };
+    // For the base case, worst-case assumption is slightly relaxed. The base at
+    // the 90th percentile case is used as final estimation.
+    let base_case = {
+        let mut p_results = estimation("Base Case", iters);
+        // Take the 90th percentile measured.
+        p_results.swap_remove(1)
+    };
+
+    base_case
+}
+
 pub(crate) fn read_node_from_accounting_cache(testbed: &mut Testbed) -> GasCost {
     let debug = testbed.config.debug;
     let iters = 200;
@@ -215,6 +243,32 @@ impl AccessTracker for EstimatorAccessTracker {
     ) {
         self.0.borrow_mut().insert(key, value);
     }
+}
+
+fn estimate_trie_read_cost_ext(testbed: &mut Testbed, iters: usize) -> Vec<GasCost> {
+    (0..iters)
+        .map(|i| {
+            let start = GasCost::measure(testbed.config.metric);
+            let trie = testbed.trie();
+            assert!(trie.has_memtries());
+            {
+                let locked_trie = trie.lock_for_iter();
+                let items: Vec<_> = locked_trie
+                    .iter()
+                    .expect("Failed to get iterator")
+                    .map(|r| r.expect("Failed to read item"))
+                    .collect();
+                eprintln!("Iteration {}: Read {} items from trie", i, items.len());
+            }
+
+            let accessed_nodes =
+                trie.recorded_storage().expect("recorded storage missing").nodes.len();
+
+            let cost = start.elapsed();
+            eprintln!("Iteration {}: Read {} nodes, cost: {:?}", i, accessed_nodes, cost);
+            cost / accessed_nodes as u64
+        })
+        .collect()
 }
 
 fn read_node_from_accounting_cache_ext(
