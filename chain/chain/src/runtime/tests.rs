@@ -3,6 +3,7 @@ use crate::runtime::apply_chunk_test_utils::{
     TestApplyChunkParams, TestEnv, TestEnvConfig, test_apply_new_chunk_impl,
     test_apply_new_chunk_setup,
 };
+use crate::spice_core::CoreStatementsProcessor;
 use crate::types::{ChainConfig, RuntimeStorageConfig};
 use crate::{Chain, ChainGenesis, ChainStoreAccess, DoomslugThresholdMode};
 use assert_matches::assert_matches;

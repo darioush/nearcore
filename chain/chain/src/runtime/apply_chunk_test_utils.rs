@@ -176,7 +176,8 @@ impl TestEnv {
             if config.zero_fees { RuntimeConfigStore::free() } else { RuntimeConfigStore::test() };
 
         let compiled_contract_cache =
-            FilesystemContractRuntimeCache::new(&dir.as_ref(), None::<&str>).unwrap();
+            FilesystemContractRuntimeCache::new(&dir.as_ref(), None::<&str>, "contract.cache")
+                .unwrap();
 
         initialize_genesis_state(store.clone(), &genesis, Some(dir.path()));
         let epoch_manager = EpochManager::new_arc_handle(store.clone(), &genesis.config, None);
