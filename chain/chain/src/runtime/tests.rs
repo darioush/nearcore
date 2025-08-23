@@ -47,7 +47,7 @@ use std::collections::HashSet;
 #[test]
 fn test_apply_new_chunk() {
     let params =
-        TestApplyChunkParams { num_txs_per_chunk: 1000, num_shards: 4, num_accounts: 1000 };
+        TestApplyChunkParams { num_txs_per_block: 1000, num_shards: 4, num_accounts: 1000 };
     let setup = test_apply_new_chunk_setup(params);
     let verbose = true;
     test_apply_new_chunk_impl(&setup, verbose);

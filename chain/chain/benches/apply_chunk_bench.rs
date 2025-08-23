@@ -30,7 +30,7 @@ fn bench_apply_chunk(c: &mut Criterion) {
     group.sample_size(20); // reduces sample count
 
     let params = TestApplyChunkParams {
-        num_txs_per_chunk: 4000 * 20,
+        num_txs_per_block: 4000 * 20,
         num_shards: 20,
         num_accounts: 50000 * 20,
     };
@@ -52,7 +52,7 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("apply_chunk_parallel");
     let params = TestApplyChunkParams {
-        num_txs_per_chunk: 4000 * 20,
+        num_txs_per_block: 5500 * 20,
         num_shards: 20,
         num_accounts: 50000 * 20,
     };

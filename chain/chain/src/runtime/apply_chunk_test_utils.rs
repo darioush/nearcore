@@ -588,7 +588,7 @@ fn gen_transactions_by_shard(
 
 pub struct TestApplyChunkParams {
     pub num_shards: usize,
-    pub num_txs_per_chunk: usize,
+    pub num_txs_per_block: usize,
     pub num_accounts: usize,
 }
 
@@ -646,7 +646,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         env.head.last_block_hash,
         &mut config_ext.user_accounts,
         &shard_layout,
-        params.num_txs_per_chunk,
+        params.num_txs_per_block,
     );
     // These chunks will not have any incoming receipts, so we are going to make another
     // step right after this one to generate some receipts.
@@ -657,7 +657,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         env.head.last_block_hash,
         &mut config_ext.user_accounts,
         &shard_layout,
-        params.num_txs_per_chunk,
+        params.num_txs_per_block,
     );
 
     // Remember receipts so we can apply them with the recorded storage.
@@ -680,7 +680,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         env.head.last_block_hash,
         &mut config_ext.user_accounts,
         &shard_layout,
-        params.num_txs_per_chunk,
+        params.num_txs_per_block,
     );
 
     TestApplyChunkSetup {
