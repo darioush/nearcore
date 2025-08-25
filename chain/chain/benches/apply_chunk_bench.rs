@@ -33,6 +33,7 @@ fn bench_apply_chunk(c: &mut Criterion) {
         num_txs_per_block: 4000 * 20,
         num_shards: 20,
         num_accounts: 50000 * 20,
+        cross_shard_transactions: true,
     };
     let setup = test_apply_new_chunk_setup(params);
     //let verbose = false;
@@ -50,11 +51,33 @@ fn bench_apply_chunk(c: &mut Criterion) {
 fn bench_apply_chunk_parallel(c: &mut Criterion) {
     global_setup();
 
+    // Get NUM_TXS_PER_BLOCK from environment variable
+    let num_txs_per_block: usize = std::env::var("NUM_TXS_PER_BLOCK")
+        .unwrap_or_else(|_| "5000".into())
+        .parse()
+        .expect("Failed to parse NUM_TXS_PER_BLOCK");
+    // Get CROSS_SHARD_TRANSACTIONS from environment variable
+    let cross_shard_transactions = std::env::var("CROSS_SHARD_TRANSACTIONS")
+        .unwrap_or_else(|_| "false".into())
+        .parse()
+        .expect("Failed to parse CROSS_SHARD_TRANSACTIONS");
+    // Get NUM_SHARDS from environment variable
+    let num_shards = std::env::var("NUM_SHARDS")
+        .unwrap_or_else(|_| "20".into())
+        .parse()
+        .expect("Failed to parse NUM_SHARDS");
+    // Get NUM_ACCOUNTS from environment variable
+    let num_accounts: usize = std::env::var("NUM_ACCOUNTS")
+        .unwrap_or_else(|_| "50000".into())
+        .parse()
+        .expect("Failed to parse NUM_ACCOUNTS");
+
     let mut group = c.benchmark_group("apply_chunk_parallel");
     let params = TestApplyChunkParams {
-        num_txs_per_block: 5500 * 20,
-        num_shards: 20,
-        num_accounts: 50000 * 20,
+        num_txs_per_block: num_txs_per_block * num_shards,
+        num_shards: num_shards,
+        num_accounts: num_accounts * num_shards,
+        cross_shard_transactions,
     };
     let setup = test_apply_new_chunk_setup(params);
 

@@ -86,6 +86,7 @@ pub struct TestEnv {
     pub head: Tip,
     pub state_roots: Vec<StateRoot>,
     pub last_receipts: HashMap<ShardId, Vec<Receipt>>,
+    pub last_congestion_info: HashMap<ShardId, CongestionInfo>,
     pub last_shard_proposals: HashMap<ShardId, Vec<ValidatorStake>>,
     pub last_proposals: Vec<ValidatorStake>,
     pub last_proofs: HashMap<ShardId, PartialStorage>,
@@ -172,8 +173,11 @@ impl TestEnv {
         let genesis_total_supply = genesis.config.total_supply;
         let genesis_protocol_version = genesis.config.protocol_version;
 
-        let runtime_config_store =
-            if config.zero_fees { RuntimeConfigStore::free() } else { RuntimeConfigStore::test() };
+        let runtime_config_store = if config.zero_fees {
+            RuntimeConfigStore::free()
+        } else {
+            RuntimeConfigStore::test_congestion_control_disabled()
+        };
 
         let compiled_contract_cache =
             FilesystemContractRuntimeCache::new(&dir.as_ref(), None::<&str>, "contract.cache")
@@ -291,6 +295,7 @@ impl TestEnv {
             },
             state_roots,
             last_receipts: HashMap::default(),
+            last_congestion_info: HashMap::default(),
             last_proposals: vec![],
             last_shard_proposals: HashMap::default(),
             last_proofs: HashMap::default(),
@@ -337,8 +342,8 @@ impl TestEnv {
         context: &TestApplyChunkContext,
         storage: Option<PartialStorage>,
     ) -> ApplyChunkArgs {
-        // TODO(congestion_control): pass down prev block info and read congestion info from there
-        // For now, just use default.
+        // TODO(congestion_control): support missed chunks
+        let missed_chunks_count = 0;
         // TODO(bandwidth_scheduler) - pass bandwidth requests from prev_block
         let prev_block_hash = context.prev_block_hash;
         let epoch_id = self.epoch_manager.get_epoch_id_from_prev_block(&prev_block_hash).unwrap();
@@ -348,7 +353,16 @@ impl TestEnv {
         let shard_ids = self.epoch_manager.shard_ids(&epoch_id).unwrap();
         let shards_congestion_info = shard_ids
             .into_iter()
-            .map(|shard_id| (shard_id, ExtendedCongestionInfo::default()))
+            .map(|shard_id| {
+                (
+                    shard_id,
+                    self.last_congestion_info
+                        .get(&shard_id)
+                        .cloned()
+                        .map(|ci| ExtendedCongestionInfo::new(ci, missed_chunks_count))
+                        .unwrap_or(ExtendedCongestionInfo::default()),
+                )
+            })
             .collect();
         let congestion_info = BlockCongestionInfo::new(shards_congestion_info);
         let transaction_validity = vec![true; transactions.len()];
@@ -464,6 +478,8 @@ impl TestEnv {
                     self.last_proofs.insert(shard_id, storage);
                 }
             }
+            self.last_congestion_info
+                .insert(shard_id, apply_result.congestion_info.unwrap().clone());
         }
         self.epoch_manager
             .add_validator_proposals(
@@ -557,21 +573,47 @@ pub struct TestApplyChunkContext {
 
 const TERAGAS: u64 = 1_000_000_000_000;
 
+fn choose_account_idx_in_shard(
+    rng: &mut StdRng,
+    accounts: &[UserAccount],
+    shard_layout: &ShardLayout,
+    shard_id: ShardId,
+) -> usize {
+    let shard_index = shard_layout.get_shard_index(shard_id).unwrap();
+    let num_shards = shard_layout.num_shards() as usize;
+    let first_account = shard_index * accounts.len() / num_shards;
+    let last_account = (shard_index + 1) * accounts.len() / num_shards - 1;
+    rng.gen_range(first_account..last_account)
+}
+
 fn gen_transactions_by_shard(
     rng: &mut StdRng,
     block_hash: CryptoHash,
     accounts: &mut [UserAccount],
     shard_layout: &ShardLayout,
     num_transactions: usize,
+    cross_shard_transactions: bool,
 ) -> Vec<Vec<SignedTransaction>> {
     let mut transactions_by_shard_index = vec![Vec::new(); shard_layout.num_shards() as usize];
 
     for _ in 0..num_transactions {
         // Choose sender and receiver randomly from the accounts.
         let sender = rng.gen_range(0..accounts.len());
-        let receiver = rng.gen_range(0..accounts.len());
-
         let shard_id = shard_layout.account_id_to_shard_id(&accounts[sender].account_id);
+
+        let receiver = if cross_shard_transactions {
+            rng.gen_range(0..accounts.len())
+        } else {
+            choose_account_idx_in_shard(rng, accounts, shard_layout, shard_id)
+        };
+
+        if !cross_shard_transactions {
+            assert_eq!(
+                shard_id,
+                shard_layout.account_id_to_shard_id(&accounts[receiver].account_id)
+            );
+        }
+
         let shard_index = shard_layout.get_shard_index(shard_id).unwrap();
         transactions_by_shard_index[shard_index].push(SignedTransaction::send_money(
             accounts[sender].next_nonce(),
@@ -590,6 +632,7 @@ pub struct TestApplyChunkParams {
     pub num_shards: usize,
     pub num_txs_per_block: usize,
     pub num_accounts: usize,
+    pub cross_shard_transactions: bool,
 }
 
 pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChunkSetup {
@@ -647,6 +690,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         &mut config_ext.user_accounts,
         &shard_layout,
         params.num_txs_per_block,
+        params.cross_shard_transactions,
     );
     // These chunks will not have any incoming receipts, so we are going to make another
     // step right after this one to generate some receipts.
@@ -658,6 +702,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         &mut config_ext.user_accounts,
         &shard_layout,
         params.num_txs_per_block,
+        params.cross_shard_transactions,
     );
 
     // Remember receipts so we can apply them with the recorded storage.
@@ -681,6 +726,7 @@ pub fn test_apply_new_chunk_setup(params: TestApplyChunkParams) -> TestApplyChun
         &mut config_ext.user_accounts,
         &shard_layout,
         params.num_txs_per_block,
+        params.cross_shard_transactions,
     );
 
     TestApplyChunkSetup {
@@ -737,7 +783,7 @@ pub struct TestApplyChunkSetup {
 }
 
 // TODO: Use NewChunkData instead
-struct ApplyChunkArgs {
+pub struct ApplyChunkArgs {
     storage_config: RuntimeStorageConfig,
     apply_reason: ApplyChunkReason,
     shard_id: ShardId,
