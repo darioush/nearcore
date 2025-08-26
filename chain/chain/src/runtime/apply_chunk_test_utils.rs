@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::stateless_validation::processing_tracker::ProcessingDoneTracker;
 use crate::types::BlockType;
@@ -16,6 +16,7 @@ use near_primitives::bandwidth_scheduler::{BandwidthRequests, BlockBandwidthRequ
 use near_primitives::congestion_info::{BlockCongestionInfo, CongestionInfo};
 use near_primitives::epoch_block_info::BlockInfo;
 use near_primitives::shard_layout::{ShardLayout, get_block_shard_uid};
+use near_primitives::transaction::ExecutionStatus;
 use near_primitives::types::chunk_extra::ChunkExtra;
 use near_primitives::types::validator_stake::{ValidatorStake, ValidatorStakeIter};
 use near_primitives::types::{AccountId, BlockHeightDelta, Nonce, ValidatorId};
@@ -87,6 +88,7 @@ pub struct TestEnv {
     pub state_roots: Vec<StateRoot>,
     pub last_receipts: HashMap<ShardId, Vec<Receipt>>,
     pub last_congestion_info: HashMap<ShardId, CongestionInfo>,
+    pub last_bandwidth_requests: BTreeMap<ShardId, BandwidthRequests>,
     pub last_shard_proposals: HashMap<ShardId, Vec<ValidatorStake>>,
     pub last_proposals: Vec<ValidatorStake>,
     pub last_proofs: HashMap<ShardId, PartialStorage>,
@@ -296,6 +298,7 @@ impl TestEnv {
             state_roots,
             last_receipts: HashMap::default(),
             last_congestion_info: HashMap::default(),
+            last_bandwidth_requests: BTreeMap::default(),
             last_proposals: vec![],
             last_shard_proposals: HashMap::default(),
             last_proofs: HashMap::default(),
@@ -331,6 +334,8 @@ impl TestEnv {
             prev_block_hash: self.head.last_block_hash,
             state_root: self.state_roots[shard_index],
             height: self.head.height + 1,
+            last_bandwidth_requests: self.last_bandwidth_requests.clone(),
+            last_congestion_info: self.last_congestion_info.clone(),
         }
     }
 
@@ -356,7 +361,8 @@ impl TestEnv {
             .map(|shard_id| {
                 (
                     shard_id,
-                    self.last_congestion_info
+                    context
+                        .last_congestion_info
                         .get(&shard_id)
                         .cloned()
                         .map(|ci| ExtendedCongestionInfo::new(ci, missed_chunks_count))
@@ -395,7 +401,9 @@ impl TestEnv {
                 gas_price,
                 random_seed: CryptoHash::default(),
                 congestion_info,
-                bandwidth_requests: BlockBandwidthRequests::empty(),
+                bandwidth_requests: BlockBandwidthRequests {
+                    shards_bandwidth_requests: context.last_bandwidth_requests.clone(),
+                },
             },
             receipts: receipts.to_vec(),
             transactions,
@@ -412,8 +420,11 @@ impl TestEnv {
         new_block_hash: CryptoHash,
         transactions: Vec<SignedTransaction>,
         receipts: &[Receipt],
+        context: &TestApplyChunkContext,
     ) -> ApplyChunkResult {
-        let mut apply_result = self.apply_new_chunk(shard_id, transactions, receipts);
+        let args =
+            self.apply_new_chunk_args_with_storage(shard_id, transactions, receipts, context, None);
+        let mut apply_result = self.apply_new_chunk_with_storage(args);
         let mut store_update = self.runtime.store().store_update();
         let flat_state_changes =
             FlatStateChanges::from_state_changes(&apply_result.trie_changes.state_changes());
@@ -461,15 +472,43 @@ impl TestEnv {
         if self.keep_proofs {
             self.last_proofs.clear();
         }
-        for shard_id in shard_ids {
+        let apply_contexts = shard_ids
+            .iter()
+            .map(|shard_id| self.apply_chunk_context(*shard_id))
+            .collect::<Vec<_>>();
+
+        for (context, shard_id) in apply_contexts.iter().zip(shard_ids) {
             let shard_index = shard_layout.get_shard_index(shard_id).unwrap();
             let apply_result = self.update_runtime(
                 shard_id,
                 new_hash,
                 transactions[shard_index].clone(),
                 self.last_receipts.get(&shard_id).map_or(&[], |v| v.as_slice()),
+                context,
             );
             self.state_roots[shard_index] = apply_result.new_root;
+            let outgoing_shards = HashSet::<ShardId>::from_iter(
+                apply_result
+                    .outgoing_receipts
+                    .iter()
+                    .map(|receipt| receipt.receiver_shard_id(&shard_layout).unwrap()),
+            );
+            eprintln!(
+                "Shard {}: applied {} transactions, {} incoming receipts, {} outgoing receipts, gas used: {}T, outgoing shards: {:?}",
+                shard_id,
+                transactions[shard_index].len(),
+                self.last_receipts.get(&shard_id).map_or(0, |v| v.len()),
+                apply_result.outgoing_receipts.len(),
+                apply_result.total_gas_burnt / TERAGAS,
+                outgoing_shards
+            );
+            apply_result.outcomes.iter().for_each(|outcome| match &outcome.outcome.status {
+                ExecutionStatus::SuccessValue(_) | ExecutionStatus::SuccessReceiptId(_) => {}
+                _ => {
+                    eprintln!("Shard {}: applied outcome: {:?}", shard_id, outcome);
+                }
+            });
+
             all_receipts.extend(apply_result.outgoing_receipts);
             all_proposals.append(&mut apply_result.validator_proposals.clone());
             self.last_shard_proposals.insert(shard_id, apply_result.validator_proposals);
@@ -480,6 +519,7 @@ impl TestEnv {
             }
             self.last_congestion_info
                 .insert(shard_id, apply_result.congestion_info.unwrap().clone());
+            self.last_bandwidth_requests.insert(shard_id, apply_result.bandwidth_requests);
         }
         self.epoch_manager
             .add_validator_proposals(
@@ -569,6 +609,8 @@ pub struct TestApplyChunkContext {
     pub prev_block_hash: CryptoHash,
     pub state_root: StateRoot,
     pub height: u64,
+    pub last_congestion_info: HashMap<ShardId, CongestionInfo>,
+    pub last_bandwidth_requests: BTreeMap<ShardId, BandwidthRequests>,
 }
 
 const TERAGAS: u64 = 1_000_000_000_000;

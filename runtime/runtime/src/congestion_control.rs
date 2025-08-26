@@ -25,6 +25,7 @@ use near_store::trie::receipts_column_helper::{
 use near_store::{StorageError, TrieAccess, TrieUpdate};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::u64;
 
 pub(crate) enum ReceiptSink {
     V2(ReceiptSinkV2WithInfo),
@@ -72,6 +73,7 @@ pub(crate) struct ReceiptSinkV2 {
 
 /// Limits for outgoing receipts to a shard.
 /// Receipts are sent out until the limit is hit, after that they're buffered.
+#[derive(Debug)]
 pub(crate) struct OutgoingLimit {
     pub gas: Gas,
     pub size: u64,
@@ -115,7 +117,8 @@ impl ReceiptSink {
                     .granted_bandwidth
                     .get_granted_bandwidth(apply_state.shard_id, shard_id);
 
-                (shard_id, OutgoingLimit { gas: gas_limit, size: size_limit })
+                let _size_limit = size_limit; // XXX
+                (shard_id, OutgoingLimit { gas: gas_limit, size: u64::MAX })
             })
             .collect();
 
