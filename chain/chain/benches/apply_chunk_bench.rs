@@ -51,11 +51,11 @@ fn bench_apply_chunk(c: &mut Criterion) {
 fn bench_apply_chunk_parallel(c: &mut Criterion) {
     global_setup();
 
-    // Get NUM_TXS_PER_BLOCK from environment variable
-    let num_txs_per_block: usize = std::env::var("NUM_TXS_PER_BLOCK")
+    // Get NUM_TXS_PER_SHARD from environment variable
+    let num_txs_per_shard: usize = std::env::var("NUM_TXS_PER_SHARD")
         .unwrap_or_else(|_| "5000".into())
         .parse()
-        .expect("Failed to parse NUM_TXS_PER_BLOCK");
+        .expect("Failed to parse NUM_TXS_PER_SHARD");
     // Get CROSS_SHARD_TRANSACTIONS from environment variable
     let cross_shard_transactions = std::env::var("CROSS_SHARD_TRANSACTIONS")
         .unwrap_or_else(|_| "false".into())
@@ -74,7 +74,7 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("apply_chunk_parallel");
     let params = TestApplyChunkParams {
-        num_txs_per_block: num_txs_per_block * num_shards,
+        num_txs_per_block: num_txs_per_shard * num_shards,
         num_shards: num_shards,
         num_accounts: num_accounts * num_shards,
         cross_shard_transactions,
