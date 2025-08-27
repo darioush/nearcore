@@ -71,6 +71,26 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
         .unwrap_or_else(|_| "50000".into())
         .parse()
         .expect("Failed to parse NUM_ACCOUNTS");
+    let num_busy_threads: usize = std::env::var("NUM_BUSY_THREADS")
+        .unwrap_or_else(|_| "0".into())
+        .parse()
+        .expect("Failed to parse NUM_BUSY_THREADS");
+
+    // spawn busy threads
+    for _ in 0..num_busy_threads {
+        std::thread::spawn(|| {
+            loop {
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_millis(90) {
+                    // Some trivial work to prevent optimizing out
+                    std::hint::black_box(1 + 2);
+                }
+
+                // Sleep for ~10% of the cycle
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
 
     let mut group = c.benchmark_group("apply_chunk_parallel");
     let params = TestApplyChunkParams {
