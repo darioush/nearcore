@@ -128,7 +128,10 @@ start_neard0() {
 
 start_nodes_local() {
     if [ "${NUM_NODES}" -eq "1" ]; then
-        sudo systemctl start neard
+        # sudo systemctl start neard
+        echo "Starting single node: ${NEAR_HOME}"
+        mkdir -p ${LOG_DIR}
+        nohup ${NEARD} --home ${NEAR_HOME} run &>${LOG_DIR}/$(basename ${NEAR_HOME}) &
     else
         mkdir -p ${LOG_DIR}
         for node in "${NEAR_HOMES[@]}"; do
@@ -157,7 +160,8 @@ stop_nodes_forknet() {
 
 stop_nodes_local() {
     if [ "${NUM_NODES}" -eq "1" ]; then
-        sudo systemctl stop neard
+        #sudo systemctl stop neard
+        killall neard || true
     else
         killall --wait neard || true
     fi
