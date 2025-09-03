@@ -75,6 +75,10 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
         .unwrap_or_else(|_| "0".into())
         .parse()
         .expect("Failed to parse NUM_BUSY_THREADS");
+    let num_concurrent_applies: usize = std::env::var("NUM_CONCURRENT_APPLIES")
+        .unwrap_or_else(|_| "7".into())
+        .parse()
+        .expect("Failed to parse NUM_CONCURRENT_APPLIES");
 
     // spawn busy threads
     for _ in 0..num_busy_threads {
@@ -95,7 +99,7 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
     let mut group = c.benchmark_group("apply_chunk_parallel");
     let params = TestApplyChunkParams {
         num_txs_per_block: num_txs_per_shard * num_shards,
-        num_shards: num_shards,
+        num_shards,
         num_accounts: num_accounts * num_shards,
         cross_shard_transactions,
     };
@@ -107,18 +111,21 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
         let runtime = runtime.clone();
         let spawner = spawner.clone();
 
+        let mut apply_from_recorded = vec![
+            (0, Duration::from_millis(0)),
+            (1, Duration::from_millis(0)),
+            (2, Duration::from_millis(0)),
+            (3, Duration::from_millis(0)),
+            (4, Duration::from_millis(0)),
+            (5, Duration::from_millis(0)),
+            (6, Duration::from_millis(0)),
+        ];
+        apply_from_recorded.truncate(num_concurrent_applies);
+
         b.iter_batched(
             || {
                 setup.new_case(
-                    vec![
-                        (0, Duration::from_millis(0)),
-                        (1, Duration::from_millis(0)),
-                        (2, Duration::from_millis(0)),
-                        (3, Duration::from_millis(0)),
-                        (4, Duration::from_millis(0)),
-                        (5, Duration::from_millis(0)),
-                        (6, Duration::from_millis(0)),
-                    ],
+                    apply_from_recorded.clone(),
                     //vec![(7, Duration::from_millis(0))],
                     vec![],
                 )
