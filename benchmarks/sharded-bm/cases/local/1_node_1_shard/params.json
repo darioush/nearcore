@@ -6,5 +6,5 @@
     "num_accounts": 1000,
     "channel_buffer_size": 60000,
     "requests_per_second": 4000,
-    "num_transfers": 300000
+    "num_transfers": 300000000
 }

@@ -240,9 +240,10 @@ impl ValidatedTransaction {
             ));
         }
 
-        if signed_tx
-            .signature
-            .verify(signed_tx.get_hash().as_ref(), signed_tx.transaction.public_key())
+        if signed_tx.validated
+            || signed_tx
+                .signature
+                .verify(signed_tx.get_hash().as_ref(), signed_tx.transaction.public_key())
         {
             Ok(Self(signed_tx))
         } else {
@@ -327,14 +328,25 @@ pub struct SignedTransaction {
     hash: CryptoHash,
     #[borsh(skip)]
     size: u64,
+    #[borsh(skip)]
+    validated: bool,
 }
 
 impl SignedTransaction {
     pub fn new(signature: Signature, transaction: Transaction) -> Self {
-        let mut signed_tx =
-            Self { signature, transaction, hash: CryptoHash::default(), size: u64::default() };
+        let mut signed_tx = Self {
+            signature,
+            transaction,
+            hash: CryptoHash::default(),
+            size: u64::default(),
+            validated: false,
+        };
         signed_tx.init();
         signed_tx
+    }
+
+    pub fn mark_validated(&mut self) {
+        self.validated = true;
     }
 
     pub fn init(&mut self) {

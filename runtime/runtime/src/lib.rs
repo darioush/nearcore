@@ -24,7 +24,7 @@ use global_contracts::{
 use itertools::Itertools;
 use metrics::ApplyMetrics;
 pub use near_crypto;
-use near_crypto::PublicKey;
+use near_crypto::{PublicKey, Signature};
 use near_parameters::{ActionCosts, RuntimeConfig};
 pub use near_primitives;
 use near_primitives::account::{AccessKey, Account};
@@ -44,7 +44,7 @@ use near_primitives::state_record::StateRecord;
 use near_primitives::stateless_validation::contract_distribution::ContractUpdates;
 use near_primitives::transaction::{
     Action, ExecutionMetadata, ExecutionOutcome, ExecutionOutcomeWithId, ExecutionStatus, LogEntry,
-    TransferAction,
+    SignedTransaction, TransferAction,
 };
 use near_primitives::trie_key::TrieKey;
 use near_primitives::types::{
@@ -75,6 +75,7 @@ use near_vm_runner::logic::types::PromiseResult;
 pub use near_vm_runner::with_ext_cost_counter;
 use pipelining::ReceiptPreparationPipeline;
 use rayon::prelude::*;
+use smallvec::SmallVec;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -1483,6 +1484,36 @@ impl Runtime {
         state_update.commit(StateChangeCause::Migration);
     }
 
+    fn validate_batch(&self, txs: &mut Vec<SignedTransaction>) -> bool {
+        let mut messages = Vec::with_capacity(txs.len());
+        let mut signatures = Vec::with_capacity(txs.len());
+        let mut keys = Vec::with_capacity(txs.len());
+
+        for tx in txs.iter() {
+            messages.push(tx.get_hash());
+            match tx.signature {
+                Signature::ED25519(sig) => signatures.push(sig),
+                _ => return false,
+            }
+            match tx.transaction.public_key() {
+                PublicKey::ED25519(key) => match ed25519_dalek::VerifyingKey::from_bytes(&key.0) {
+                    Ok(public_key) => keys.push(public_key),
+                    Err(_) => return false,
+                },
+                _ => return false,
+            }
+        }
+
+        let messages: Vec<_> = messages.iter().map(|msg| msg.as_ref()).collect();
+        let result = near_crypto_ed25519_batch::safe_verify_batch(&messages, &signatures, &keys);
+        if result.is_ok() {
+            for tx in txs.iter_mut() {
+                tx.mark_validated();
+            }
+        }
+        result.is_ok()
+    }
+
     /// Processes a collection of transactions.
     ///
     /// Fills the `processing_state` with local receipts generated during processing of the
@@ -1512,7 +1543,13 @@ impl Runtime {
         let total = &mut processing_state.total;
         let apply_state = &mut processing_state.apply_state;
         let state_update = &mut processing_state.state_update;
-        let tx_vec = signed_txs.into_nonexpired_transactions();
+        let mut tx_vec = signed_txs.into_nonexpired_transactions();
+        let success = self.validate_batch(&mut tx_vec);
+        if !success {
+            eprintln!(
+                "Batch signature verification failed, falling back to individual verification"
+            );
+        }
         let len = tx_vec.len();
         let chunk_count_target = rayon::current_num_threads() * TARGET_CHUNKS_PER_THREAD;
         let chunk_size =
