@@ -57,6 +57,7 @@ near-parameters.workspace = true
 near-vm-runner.workspace = true
 near-schema-checker-lib.workspace = true
 primitive-types.workspace = true
+snmalloc-rs = "0.3"   # or latest
 
 [dev-dependencies]
 criterion.workspace = true
