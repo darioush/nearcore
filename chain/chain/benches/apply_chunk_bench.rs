@@ -91,8 +91,8 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
                     std::hint::black_box(1 + 2);
 
                     // Allocate some memory to increase pressure on the allocator
-                    // Pick a random allocation size between 1 and 10 MB
-                    let size = rand::thread_rng().gen_range(1..=10) * 1024 * 1024;
+                    // Pick a random allocation size between 100KB and 1MB
+                    let size = rand::thread_rng().gen_range(100 * 1024..1024 * 1024);
                     let vec: Vec<u8> = vec![0; size];
                     std::hint::black_box(vec);
                 }
