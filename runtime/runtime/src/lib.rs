@@ -1551,14 +1551,16 @@ impl Runtime {
         let chunk_size =
             std::env::var("CHUNK_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
 
-        tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
+        if chunk_size > 0 {
+            tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
             let success = self.validate_batch(chunk);
             if !success {
                 eprintln!(
                     "Batch signature verification failed, falling back to individual verification"
                 );
             }
-        });
+            });
+        }
 
         let len = tx_vec.len();
         let chunk_count_target = rayon::current_num_threads() * TARGET_CHUNKS_PER_THREAD;

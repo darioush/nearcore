@@ -7,6 +7,7 @@ use near_chain::ApplyChunksSpawner;
 use near_chain::runtime::apply_chunk_test_utils::{
     self, TestApplyChunkParams, test_apply_new_chunk_impl, test_apply_new_chunk_setup,
 };
+use rand::Rng;
 
 // cspell:words tikv jemallocator Jemalloc
 #[global_allocator]
@@ -88,6 +89,12 @@ fn bench_apply_chunk_parallel(c: &mut Criterion) {
                 while start.elapsed() < Duration::from_millis(90) {
                     // Some trivial work to prevent optimizing out
                     std::hint::black_box(1 + 2);
+
+                    // Allocate some memory to increase pressure on the allocator
+                    // Pick a random allocation size between 1 and 10 MB
+                    let size = rand::thread_rng().gen_range(1..=10) * 1024 * 1024;
+                    let vec: Vec<u8> = vec![0; size];
+                    std::hint::black_box(vec);
                 }
 
                 // Sleep for ~10% of the cycle
