@@ -1484,10 +1484,11 @@ impl Runtime {
         state_update.commit(StateChangeCause::Migration);
     }
 
-    fn validate_batch(&self, txs: &mut Vec<SignedTransaction>) -> bool {
-        let mut messages = Vec::with_capacity(txs.len());
-        let mut signatures = Vec::with_capacity(txs.len());
-        let mut keys = Vec::with_capacity(txs.len());
+    fn validate_batch(&self, txs: &mut [SignedTransaction]) -> bool {
+        const MAX_BATCH_SIZE: usize = 1024;
+        let mut messages = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
+        let mut signatures = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
+        let mut keys = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
 
         for tx in txs.iter() {
             messages.push(tx.get_hash());
@@ -1504,7 +1505,8 @@ impl Runtime {
             }
         }
 
-        let messages: Vec<_> = messages.iter().map(|msg| msg.as_ref()).collect();
+        let messages: SmallVec<[_; MAX_BATCH_SIZE]> =
+            messages.iter().map(|msg| msg.as_ref()).collect();
         let result = near_crypto_ed25519_batch::safe_verify_batch(&messages, &signatures, &keys);
         if result.is_ok() {
             for tx in txs.iter_mut() {
@@ -1544,12 +1546,15 @@ impl Runtime {
         let apply_state = &mut processing_state.apply_state;
         let state_update = &mut processing_state.state_update;
         let mut tx_vec = signed_txs.into_nonexpired_transactions();
-        let success = self.validate_batch(&mut tx_vec);
-        if !success {
-            eprintln!(
-                "Batch signature verification failed, falling back to individual verification"
-            );
-        }
+        tx_vec.chunks_mut(1024).for_each(|chunk| {
+            let success = self.validate_batch(chunk);
+            if !success {
+                eprintln!(
+                    "Batch signature verification failed, falling back to individual verification"
+                );
+            }
+        });
+
         let len = tx_vec.len();
         let chunk_count_target = rayon::current_num_threads() * TARGET_CHUNKS_PER_THREAD;
         let chunk_size =
