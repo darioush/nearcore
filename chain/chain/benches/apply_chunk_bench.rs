@@ -10,11 +10,11 @@ use near_chain::runtime::apply_chunk_test_utils::{
 use rand::Rng;
 
 // cspell:words tikv jemallocator Jemalloc
-// #[global_allocator]
-// static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 #[global_allocator]
-static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// #[global_allocator]
+// static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 static INIT: Once = Once::new();
 
