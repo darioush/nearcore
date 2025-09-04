@@ -1546,7 +1546,12 @@ impl Runtime {
         let apply_state = &mut processing_state.apply_state;
         let state_update = &mut processing_state.state_update;
         let mut tx_vec = signed_txs.into_nonexpired_transactions();
-        tx_vec.chunks_mut(1024).for_each(|chunk| {
+
+        // Get from CHUNK_SIZE env var
+        let chunk_size =
+            std::env::var("CHUNK_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+
+        tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
             let success = self.validate_batch(chunk);
             if !success {
                 eprintln!(
