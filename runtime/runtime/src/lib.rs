@@ -1552,7 +1552,7 @@ impl Runtime {
             std::env::var("CHUNK_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
 
         if chunk_size > 0 {
-            tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
+            tx_vec.par_chunks_mut(chunk_size).for_each(|chunk| {
             let success = self.validate_batch(chunk);
             if !success {
                 eprintln!(
