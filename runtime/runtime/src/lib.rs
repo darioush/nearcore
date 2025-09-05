@@ -1597,30 +1597,37 @@ impl Runtime {
                 ()
             },
             || {
-                type AccountV = Result<Option<Account>, StorageError>;
-                type AccessKeyV = Result<Option<AccessKey>, StorageError>;
-                let accounts = dashmap::DashMap::<&AccountId, AccountV>::with_capacity(len);
-                let access_keys =
-                    dashmap::DashMap::<(&AccountId, &PublicKey), AccessKeyV>::with_capacity(len);
-                tx_vec.par_chunks(chunk_size).for_each(|txs| {
-                    for tx in txs {
-                        let signer_id = tx.transaction.signer_id();
-                        let pubkey = tx.transaction.public_key();
-                        accounts
-                            .entry(signer_id)
-                            .or_insert_with(|| get_account(state_update, signer_id));
-                        access_keys
-                            .entry((signer_id, pubkey))
-                            .or_insert_with(|| get_access_key(state_update, signer_id, pubkey));
-                    }
-                });
-                (accounts, access_keys)
+                //type AccountV = Result<Option<Account>, StorageError>;
+                //type AccessKeyV = Result<Option<AccessKey>, StorageError>;
+                //let accounts = dashmap::DashMap::<&AccountId, AccountV>::with_capacity(len);
+                //let access_keys =
+                //    dashmap::DashMap::<(&AccountId, &PublicKey), AccessKeyV>::with_capacity(len);
+                //tx_vec.par_chunks(chunk_size).for_each(|txs| {
+                //    for tx in txs {
+                //        let signer_id = tx.transaction.signer_id();
+                //        let pubkey = tx.transaction.public_key();
+                //        accounts
+                //            .entry(signer_id)
+                //            .or_insert_with(|| get_account(state_update, signer_id));
+                //        access_keys
+                //            .entry((signer_id, pubkey))
+                //            .or_insert_with(|| get_access_key(state_update, signer_id, pubkey));
+                //    }
+                //});
+                //(accounts, access_keys)
+                ((), ())
             },
         );
 
         // let valid_mask_iterator = valid_masks
         //     .into_iter()
         //     .flat_map(|mask| (0..chunk_size).map(move |idx| ((mask >> idx) & 1) == 1));
+
+        type AccountV = Result<Option<Account>, StorageError>;
+        type AccessKeyV = Result<Option<AccessKey>, StorageError>;
+        let accounts = dashmap::DashMap::<&AccountId, AccountV>::with_capacity(len);
+        let access_keys =
+            dashmap::DashMap::<(&AccountId, &PublicKey), AccessKeyV>::with_capacity(len);
 
         let default_hash = CryptoHash::default();
         let mut last_tx_hash = default_hash;
@@ -1652,27 +1659,29 @@ impl Runtime {
                 };
 
             let verification_result = {
-                let mut account = accounts.get_mut(signer_id);
-                let mut account = match account.as_deref_mut() {
-                    Some(Ok(Some(a))) => a,
-                    Some(Ok(None)) => {
+                let mut account = accounts
+                    .entry(signer_id)
+                    .or_insert_with(|| get_account(state_update, signer_id));
+                let mut account = match account.value_mut() {
+                    Ok(Some(a)) => a,
+                    Ok(None) => {
                         metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
                         tracing::debug!(%tx_hash, "transaction signed by unknown account");
                         continue;
                     }
-                    Some(Err(e)) => return Err(e.clone().into()),
-                    None => unreachable!("accounts should've been prefetched"),
+                    Err(e) => return Err(e.clone().into()),
                 };
-                let mut access_key = access_keys.get_mut(&(signer_id, pubkey));
-                let mut access_key = match access_key.as_deref_mut() {
-                    Some(Ok(Some(ak))) => ak,
-                    Some(Ok(None)) => {
+                let mut access_key = access_keys
+                    .entry((signer_id, pubkey))
+                    .or_insert_with(|| get_access_key(state_update, signer_id, pubkey));
+                let mut access_key = match access_key.value_mut() {
+                    Ok(Some(ak)) => ak,
+                    Ok(None) => {
                         metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
                         tracing::debug!(%tx_hash, "transaction signed by unknown signing key");
                         continue;
                     }
-                    Some(Err(e)) => return Err(e.clone().into()),
-                    None => unreachable!("access keys should've been prefetched"),
+                    Err(e) => return Err(e.clone().into()),
                 };
                 match verify_and_charge_tx_ephemeral(
                     &apply_state.config,
