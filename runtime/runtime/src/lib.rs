@@ -1485,7 +1485,7 @@ impl Runtime {
     }
 
     fn validate_batch(&self, txs: &mut [SignedTransaction]) -> bool {
-        const MAX_BATCH_SIZE: usize = 1024;
+        const MAX_BATCH_SIZE: usize = 512;
         let mut messages = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
         let mut signatures = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
         let mut keys = SmallVec::<[_; MAX_BATCH_SIZE]>::with_capacity(txs.len());
