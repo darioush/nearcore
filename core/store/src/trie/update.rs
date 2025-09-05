@@ -134,6 +134,7 @@ impl TrieUpdate {
         let locked = self.trie.lock_for_iter();
         locked.iter().unwrap().for_each(|result| {
             if let Ok(result) = result {
+                eprintln!("Caching key in TrieUpdate: {:?}", &result.0);
                 self.cached.insert(result.0, Some(result.1));
             }
         });
