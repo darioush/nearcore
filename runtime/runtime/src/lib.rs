@@ -1551,44 +1551,50 @@ impl Runtime {
         let chunk_size =
             std::env::var("CHUNK_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
 
-        //if chunk_size > 0 {
-        //    tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
-        //    let success = self.validate_batch(chunk);
-        //    if !success {
-        //        eprintln!(
-        //            "Batch signature verification failed, falling back to individual verification"
-        //        );
-        //    }
-        //    });
-        //}
+        if chunk_size > 0 {
+            tx_vec.chunks_mut(chunk_size).for_each(|chunk| {
+            let success = self.validate_batch(chunk);
+            if !success {
+                eprintln!(
+                    "Batch signature verification failed, falling back to individual verification"
+                );
+            }
+            });
+        }
 
         let len = tx_vec.len();
         let chunk_count_target = rayon::current_num_threads() * TARGET_CHUNKS_PER_THREAD;
         let chunk_size =
             (tx_vec.len() / chunk_count_target).clamp(MIN_CHUNK_SIZE, ValidBitmask::BITS as _);
+
+        let chunk_size = std::env::var("TRIE_CHUNK_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(chunk_size);
         let protocol_version = processing_state.protocol_version;
         let (valid_masks, (accounts, access_keys)) = rayon::join(
             || {
-                tx_vec
-                    .par_chunks(chunk_size)
-                    .map(|txs| {
-                        let mut valid_mask: ValidBitmask = 0;
-                        for (idx, tx) in txs.iter().enumerate() {
-                            let tx_hash = tx.hash();
-                            let v = validate_transaction(
-                                &apply_state.config,
-                                tx.clone(),
-                                protocol_version,
-                            );
-                            if let Err((err, _)) = v {
-                                tracing::debug!(?tx_hash, ?err, "transaction invalid");
-                                continue;
-                            }
-                            valid_mask |= 1 << idx;
-                        }
-                        valid_mask
-                    })
-                    .collect::<Vec<_>>()
+                // tx_vec
+                //     .par_chunks(chunk_size)
+                //     .map(|txs| {
+                //         let mut valid_mask: ValidBitmask = 0;
+                //         for (idx, tx) in txs.iter().enumerate() {
+                //             let tx_hash = tx.hash();
+                //             let v = validate_transaction(
+                //                 &apply_state.config,
+                //                 tx.clone(),
+                //                 protocol_version,
+                //             );
+                //             if let Err((err, _)) = v {
+                //                 tracing::debug!(?tx_hash, ?err, "transaction invalid");
+                //                 continue;
+                //             }
+                //             valid_mask |= 1 << idx;
+                //         }
+                //         valid_mask
+                //     })
+                //     .collect::<Vec<_>>()
+                ()
             },
             || {
                 type AccountV = Result<Option<Account>, StorageError>;
@@ -1612,19 +1618,20 @@ impl Runtime {
             },
         );
 
-        let valid_mask_iterator = valid_masks
-            .into_iter()
-            .flat_map(|mask| (0..chunk_size).map(move |idx| ((mask >> idx) & 1) == 1));
+        // let valid_mask_iterator = valid_masks
+        //     .into_iter()
+        //     .flat_map(|mask| (0..chunk_size).map(move |idx| ((mask >> idx) & 1) == 1));
 
         let default_hash = CryptoHash::default();
         let mut last_tx_hash = default_hash;
 
-        for (tx, is_valid) in tx_vec.iter().zip(valid_mask_iterator) {
+        for tx in tx_vec.iter() {
             metrics::TRANSACTION_PROCESSED_TOTAL.inc();
-            if !is_valid {
+            let v = validate_transaction(&apply_state.config, tx.clone(), protocol_version);
+            let Ok(validated_tx) = v else {
                 metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
                 continue;
-            }
+            };
 
             last_tx_hash = tx.hash().clone();
             let signer_id = tx.transaction.signer_id();
