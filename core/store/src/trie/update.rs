@@ -137,9 +137,6 @@ impl TrieUpdate {
                 self.cached.insert(result.0, Some(result.1));
             }
         });
-        if self.cached.len() > 0 {
-            eprintln!("Cached {} trie entries", self.cached.len());
-        }
     }
 
     pub fn contains_key(&self, key: &TrieKey, opts: AccessOptions) -> Result<bool, StorageError> {
