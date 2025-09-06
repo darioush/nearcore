@@ -1377,7 +1377,10 @@ impl Runtime {
         processing_state.stats.is_new_chunk = !apply_state.is_new_chunk;
 
         // If verifying a witness, iterate the trie into the cache
-        if apply_state.apply_reason == ApplyChunkReason::ValidateChunkStateWitness {
+        let iterate_once = std::env::var("ITERATE_TRIE_ON_WITNESS")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+        if iterate_once && apply_state.apply_reason == ApplyChunkReason::ValidateChunkStateWitness {
             processing_state.state_update.set_cached();
         }
 
