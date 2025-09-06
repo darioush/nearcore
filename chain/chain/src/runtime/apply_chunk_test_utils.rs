@@ -146,12 +146,16 @@ impl TestEnv {
                 .map(|account| account.account_id.clone())
                 .collect::<Vec<_>>();
             let liquid_balance = 100_000_000 * NEAR_BASE;
-            TestGenesisBuilder::new()
+            let mut builder = TestGenesisBuilder::new()
                 .validators_spec(validators_spec.clone())
                 .genesis_time(genesis_time)
-                .shard_layout(shard_layout)
-                .add_user_accounts_simple(&user_accounts, liquid_balance)
-                .build()
+                .shard_layout(shard_layout);
+
+            for (i, account_id) in user_accounts.iter().enumerate() {
+                builder =
+                    builder.add_user_account_simple(account_id.clone(), liquid_balance + i as u128);
+            }
+            builder.build()
         } else {
             Genesis::test_sharded_new_version(
                 all_validators.into_iter().collect(),

@@ -9,7 +9,7 @@ use near_primitives::action::GlobalContractIdentifier;
 use near_primitives::apply::ApplyChunkReason;
 use near_primitives::hash::{CryptoHash, hash};
 use near_primitives::stateless_validation::contract_distribution::ContractUpdates;
-use near_primitives::trie_key::{GlobalContractCodeIdentifier, TrieKey};
+use near_primitives::trie_key::{GlobalContractCodeIdentifier, TrieKey, trie_key_parsers};
 use near_primitives::types::{
     AccountId, RawStateChange, RawStateChanges, RawStateChangesWithTrieKey, StateChangeCause,
     StateRoot,
@@ -134,10 +134,10 @@ impl TrieUpdate {
         let locked = self.trie.lock_for_iter();
         locked.iter().unwrap().for_each(|result| {
             if let Ok(result) = result {
-                eprintln!("Caching key in TrieUpdate: {:?}", &result.0);
                 self.cached.insert(result.0, Some(result.1));
             }
         });
+        eprintln!("Cached {} entries in TrieUpdate", self.cached.len());
     }
 
     pub fn contains_key(&self, key: &TrieKey, opts: AccessOptions) -> Result<bool, StorageError> {

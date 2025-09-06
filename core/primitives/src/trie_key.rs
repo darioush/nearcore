@@ -459,6 +459,242 @@ impl TrieKey {
         buf
     }
 
+    /// Parse a TrieKey from a byte vector.
+    /// This is the inverse operation of `to_vec()`.
+    pub fn from_vec(data: &[u8]) -> Result<Self, std::io::Error> {
+        if data.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "raw key is empty"));
+        }
+
+        match data[0] {
+            col::ACCOUNT => {
+                let account_id = trie_key_parsers::parse_account_id_from_account_key(data)?;
+                Ok(TrieKey::Account { account_id })
+            }
+            col::CONTRACT_CODE => {
+                let account_id = trie_key_parsers::parse_account_id_from_contract_code_key(data)?;
+                Ok(TrieKey::ContractCode { account_id })
+            }
+            col::ACCESS_KEY => trie_key_parsers::parse_trie_key_access_key_from_raw_key(data),
+            col::RECEIVED_DATA => {
+                let account_id = trie_key_parsers::parse_account_id_from_received_data_key(data)?;
+                let data_id =
+                    trie_key_parsers::parse_data_id_from_received_data_key(data, &account_id)?;
+                Ok(TrieKey::ReceivedData { receiver_id: account_id, data_id })
+            }
+            col::POSTPONED_RECEIPT_ID => {
+                let account_id = trie_key_parsers::parse_account_id_from_trie_key_with_separator(
+                    col::POSTPONED_RECEIPT_ID,
+                    data,
+                    "PostponedReceiptId",
+                )?;
+                let prefix_len = col::POSTPONED_RECEIPT_ID.len()
+                    + account_id.len()
+                    + ACCOUNT_DATA_SEPARATOR.len();
+                if data.len() < prefix_len + 32 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "raw key is too short for TrieKey::PostponedReceiptId",
+                    ));
+                }
+                let data_id = CryptoHash::try_from(&data[prefix_len..]).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Can't parse CryptoHash for TrieKey::PostponedReceiptId",
+                    )
+                })?;
+                Ok(TrieKey::PostponedReceiptId { receiver_id: account_id, data_id })
+            }
+            col::PENDING_DATA_COUNT => {
+                let account_id = trie_key_parsers::parse_account_id_from_trie_key_with_separator(
+                    col::PENDING_DATA_COUNT,
+                    data,
+                    "PendingDataCount",
+                )?;
+                let prefix_len =
+                    col::PENDING_DATA_COUNT.len() + account_id.len() + ACCOUNT_DATA_SEPARATOR.len();
+                if data.len() < prefix_len + 32 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "raw key is too short for TrieKey::PendingDataCount",
+                    ));
+                }
+                let receipt_id = CryptoHash::try_from(&data[prefix_len..]).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Can't parse CryptoHash for TrieKey::PendingDataCount",
+                    )
+                })?;
+                Ok(TrieKey::PendingDataCount { receiver_id: account_id, receipt_id })
+            }
+            col::POSTPONED_RECEIPT => {
+                let account_id = trie_key_parsers::parse_account_id_from_trie_key_with_separator(
+                    col::POSTPONED_RECEIPT,
+                    data,
+                    "PostponedReceipt",
+                )?;
+                let prefix_len =
+                    col::POSTPONED_RECEIPT.len() + account_id.len() + ACCOUNT_DATA_SEPARATOR.len();
+                if data.len() < prefix_len + 32 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "raw key is too short for TrieKey::PostponedReceipt",
+                    ));
+                }
+                let receipt_id = CryptoHash::try_from(&data[prefix_len..]).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Can't parse CryptoHash for TrieKey::PostponedReceipt",
+                    )
+                })?;
+                Ok(TrieKey::PostponedReceipt { receiver_id: account_id, receipt_id })
+            }
+            col::DELAYED_RECEIPT_OR_INDICES => {
+                if data.len() == 1 {
+                    Ok(TrieKey::DelayedReceiptIndices)
+                } else {
+                    let index = trie_key_parsers::parse_index_from_delayed_receipt_key(data)?;
+                    Ok(TrieKey::DelayedReceipt { index })
+                }
+            }
+            col::CONTRACT_DATA => {
+                let account_id = trie_key_parsers::parse_account_id_from_contract_data_key(data)?;
+                let key =
+                    trie_key_parsers::parse_data_key_from_contract_data_key(data, &account_id)?;
+                Ok(TrieKey::ContractData { account_id, key: key.to_vec() })
+            }
+            col::PROMISE_YIELD_INDICES => {
+                if data.len() == 1 {
+                    Ok(TrieKey::PromiseYieldIndices)
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected data length for TrieKey::PromiseYieldIndices",
+                    ));
+                }
+            }
+            col::PROMISE_YIELD_TIMEOUT => {
+                if data.len() != 9 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected raw key len for promise yield timeout index",
+                    ));
+                }
+                let index_bytes = data[1..9].try_into().unwrap();
+                let index = u64::from_le_bytes(index_bytes);
+                Ok(TrieKey::PromiseYieldTimeout { index })
+            }
+            col::PROMISE_YIELD_RECEIPT => {
+                let account_id = trie_key_parsers::parse_account_id_from_trie_key_with_separator(
+                    col::PROMISE_YIELD_RECEIPT,
+                    data,
+                    "PromiseYieldReceipt",
+                )?;
+                let prefix_len = col::PROMISE_YIELD_RECEIPT.len()
+                    + account_id.len()
+                    + ACCOUNT_DATA_SEPARATOR.len();
+                if data.len() < prefix_len + 32 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "raw key is too short for TrieKey::PromiseYieldReceipt",
+                    ));
+                }
+                let data_id = CryptoHash::try_from(&data[prefix_len..]).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Can't parse CryptoHash for TrieKey::PromiseYieldReceipt",
+                    )
+                })?;
+                Ok(TrieKey::PromiseYieldReceipt { receiver_id: account_id, data_id })
+            }
+            col::BUFFERED_RECEIPT_INDICES => {
+                if data.len() == 1 {
+                    Ok(TrieKey::BufferedReceiptIndices)
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected data length for TrieKey::BufferedReceiptIndices",
+                    ));
+                }
+            }
+            col::BUFFERED_RECEIPT => {
+                if data.len() != 11 {
+                    // 1 + 2 + 8 bytes
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected raw key len for buffered receipt",
+                    ));
+                }
+                let receiving_shard_bytes = data[1..3].try_into().unwrap();
+                let receiving_shard = u16::from_le_bytes(receiving_shard_bytes) as u64;
+                let index_bytes = data[3..11].try_into().unwrap();
+                let index = u64::from_le_bytes(index_bytes);
+                Ok(TrieKey::BufferedReceipt { receiving_shard: receiving_shard.into(), index })
+            }
+            col::BANDWIDTH_SCHEDULER_STATE => {
+                if data.len() == 1 {
+                    Ok(TrieKey::BandwidthSchedulerState)
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected data length for TrieKey::BandwidthSchedulerState",
+                    ));
+                }
+            }
+            col::BUFFERED_RECEIPT_GROUPS_QUEUE_DATA => {
+                if data.len() != 9 {
+                    // 1 + 8 bytes
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected raw key len for buffered receipt groups queue data",
+                    ));
+                }
+                let receiving_shard_bytes = data[1..9].try_into().unwrap();
+                let receiving_shard = u64::from_le_bytes(receiving_shard_bytes);
+                Ok(TrieKey::BufferedReceiptGroupsQueueData {
+                    receiving_shard: receiving_shard.into(),
+                })
+            }
+            col::BUFFERED_RECEIPT_GROUPS_QUEUE_ITEM => {
+                if data.len() != 17 {
+                    // 1 + 8 + 8 bytes
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unexpected raw key len for buffered receipt groups queue item",
+                    ));
+                }
+                let receiving_shard_bytes = data[1..9].try_into().unwrap();
+                let receiving_shard = u64::from_le_bytes(receiving_shard_bytes);
+                let index_bytes = data[9..17].try_into().unwrap();
+                let index = u64::from_le_bytes(index_bytes);
+                Ok(TrieKey::BufferedReceiptGroupsQueueItem {
+                    receiving_shard: receiving_shard.into(),
+                    index,
+                })
+            }
+            col::GLOBAL_CONTRACT_CODE => {
+                if data.len() < 2 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "raw key is too short for TrieKey::GlobalContractCode",
+                    ));
+                }
+                let mut buffer = &data[1..];
+                let identifier = GlobalContractCodeIdentifier::deserialize(&mut buffer)
+                    .map_err(|_| std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Can't parse GlobalContractCodeIdentifier for TrieKey::GlobalContractCode",
+                    ))?;
+                Ok(TrieKey::GlobalContractCode { identifier })
+            }
+            col::GAS_KEY => trie_key_parsers::parse_trie_key_gas_key_from_raw_key(data),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown column type: {}", data[0]),
+            )),
+        }
+    }
+
     /// Extracts account id from a TrieKey if available.
     pub fn get_account_id(&self) -> Option<AccountId> {
         match self {
@@ -1116,5 +1352,79 @@ mod tests {
         let mut buf = Vec::new();
         identifier.append_into(&mut buf);
         assert_eq!(buf.len(), identifier.len());
+    }
+
+    #[test]
+    fn test_trie_key_round_trip() {
+        use near_crypto::KeyType;
+
+        let test_cases = vec![
+            TrieKey::Account { account_id: "alice.near".parse().unwrap() },
+            TrieKey::ContractCode { account_id: "alice.near".parse().unwrap() },
+            TrieKey::AccessKey {
+                account_id: "alice.near".parse().unwrap(),
+                public_key: PublicKey::empty(KeyType::ED25519),
+            },
+            TrieKey::ReceivedData {
+                receiver_id: "alice.near".parse().unwrap(),
+                data_id: CryptoHash::hash_bytes(&[1, 2, 3]),
+            },
+            TrieKey::PostponedReceiptId {
+                receiver_id: "alice.near".parse().unwrap(),
+                data_id: CryptoHash::hash_bytes(&[4, 5, 6]),
+            },
+            TrieKey::PendingDataCount {
+                receiver_id: "alice.near".parse().unwrap(),
+                receipt_id: CryptoHash::hash_bytes(&[7, 8, 9]),
+            },
+            TrieKey::PostponedReceipt {
+                receiver_id: "alice.near".parse().unwrap(),
+                receipt_id: CryptoHash::hash_bytes(&[10, 11, 12]),
+            },
+            TrieKey::DelayedReceiptIndices,
+            TrieKey::DelayedReceipt { index: 42 },
+            TrieKey::ContractData {
+                account_id: "alice.near".parse().unwrap(),
+                key: b"storage_key".to_vec(),
+            },
+            TrieKey::PromiseYieldIndices,
+            TrieKey::PromiseYieldTimeout { index: 123 },
+            TrieKey::PromiseYieldReceipt {
+                receiver_id: "alice.near".parse().unwrap(),
+                data_id: CryptoHash::hash_bytes(&[13, 14, 15]),
+            },
+            TrieKey::BufferedReceiptIndices,
+            TrieKey::BufferedReceipt { receiving_shard: 1.into(), index: 456 },
+            TrieKey::BandwidthSchedulerState,
+            TrieKey::BufferedReceiptGroupsQueueData { receiving_shard: 2.into() },
+            TrieKey::BufferedReceiptGroupsQueueItem { receiving_shard: 3.into(), index: 789 },
+            TrieKey::GlobalContractCode {
+                identifier: GlobalContractCodeIdentifier::CodeHash(CryptoHash::hash_bytes(&[
+                    16, 17, 18,
+                ])),
+            },
+            TrieKey::GlobalContractCode {
+                identifier: GlobalContractCodeIdentifier::AccountId(
+                    "contract.near".parse().unwrap(),
+                ),
+            },
+            TrieKey::GasKey {
+                account_id: "alice.near".parse().unwrap(),
+                public_key: PublicKey::empty(KeyType::ED25519),
+                index: Some(100),
+            },
+            TrieKey::GasKey {
+                account_id: "alice.near".parse().unwrap(),
+                public_key: PublicKey::empty(KeyType::ED25519),
+                index: None,
+            },
+        ];
+
+        for original_key in test_cases {
+            let serialized = original_key.to_vec();
+            let deserialized = TrieKey::from_vec(&serialized)
+                .unwrap_or_else(|e| panic!("Failed to deserialize {:?}: {}", original_key, e));
+            assert_eq!(original_key, deserialized, "Round trip failed for {:?}", original_key);
+        }
     }
 }
