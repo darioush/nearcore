@@ -830,6 +830,11 @@ impl RuntimeAdapter for NightshadeRuntime {
         let config = self.runtime_config_store.get_config(protocol_version);
         let proof_limit = config.witness_config.main_storage_proof_size_soft_limit;
 
+        let proof_limit =
+            std::env::var("PROOF_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(proof_limit);
+
+        eprintln!("Proof limit: {}", proof_limit);
+
         let disable_trie_recording = std::env::var("DISABLE_TRIE_RECORDING")
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false)
