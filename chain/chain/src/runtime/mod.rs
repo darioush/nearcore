@@ -695,10 +695,10 @@ impl RuntimeAdapter for NightshadeRuntime {
                 break;
             }
             // XXX: Hardcode this for now as experiment, will just show it as Gas
-            if result.transactions.len() >= 15_000 {
-                result.limited_by = Some(PrepareTransactionsLimit::Gas);
-                break;
-            }
+            // if result.transactions.len() >= 15_000 {
+            //     result.limited_by = Some(PrepareTransactionsLimit::Gas);
+            //     break;
+            // }
 
             if let Some(time_limit) = &time_limit {
                 if start_time.elapsed() >= *time_limit {
