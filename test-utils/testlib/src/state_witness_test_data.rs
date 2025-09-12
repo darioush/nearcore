@@ -142,8 +142,9 @@ pub fn generate_realistic_state_witness(target_size_bytes: usize) -> ChunkStateW
             Default::default(),
         ) {
             Ok(apply_result) => {
+                let (apply_result, finalized) = apply_result.finalize();
                 // Collect structured data instead of raw bytes
-                if let Some(proof) = apply_result.proof {
+                if let Some(proof) = finalized.proof {
                     // Estimate size by serializing
                     if let Ok(serialized) = borsh::to_vec(&proof.nodes) {
                         current_witness_size += serialized.len();
@@ -165,7 +166,7 @@ pub fn generate_realistic_state_witness(target_size_bytes: usize) -> ChunkStateW
                 // Update the state for next batch
                 let mut store_update = tries.store_update();
                 current_root =
-                    tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+                    tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
                 store_update.commit().unwrap();
             }
             Err(e) => {

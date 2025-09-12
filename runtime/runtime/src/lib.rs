@@ -73,6 +73,7 @@ use near_vm_runner::ProfileDataV3;
 use near_vm_runner::logic::ReturnData;
 use near_vm_runner::logic::types::PromiseResult;
 pub use near_vm_runner::with_ext_cost_counter;
+use parking_lot::Mutex;
 use pipelining::ReceiptPreparationPipeline;
 use rayon::prelude::*;
 use std::cmp::max;
@@ -182,26 +183,87 @@ pub struct VerificationResult {
     pub burnt_amount: Balance,
 }
 
+pub struct StateUpdateHolder(Mutex<Option<TrieUpdate>>);
+
+impl std::fmt::Debug for StateUpdateHolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StateUpdateHolder {{ ... }}")
+    }
+}
+
+impl From<TrieUpdate> for StateUpdateHolder {
+    fn from(update: TrieUpdate) -> Self {
+        Self(Mutex::new(Some(update)))
+    }
+}
+
+impl StateUpdateHolder {
+    fn take(&self) -> Option<TrieUpdate> {
+        self.0.lock().take()
+    }
+}
+
 #[derive(Debug)]
 pub struct ApplyResult {
-    pub state_root: StateRoot,
-    pub trie_changes: TrieChanges,
+    pub shard_id: ShardId,
+    pub block_height: BlockHeight,
+    pub state_update: StateUpdateHolder,
     pub validator_proposals: Vec<ValidatorStake>,
     pub outgoing_receipts: Vec<Receipt>,
     pub outcomes: Vec<ExecutionOutcomeWithId>,
-    pub state_changes: Vec<RawStateChangesWithTrieKey>,
     pub stats: ChunkApplyStatsV0,
     pub processed_delayed_receipts: Vec<Receipt>,
     pub processed_yield_timeouts: Vec<PromiseYieldTimeout>,
-    pub proof: Option<PartialStorage>,
     pub delayed_receipts_count: u64,
     pub metrics: Option<metrics::ApplyMetrics>,
     pub congestion_info: Option<CongestionInfo>,
     pub bandwidth_requests: BandwidthRequests,
     /// Used only for a sanity check.
     pub bandwidth_scheduler_state_hash: CryptoHash,
+}
+
+pub struct ApplyResultFinalized {
+    pub state_root: StateRoot,
+    pub trie_changes: TrieChanges,
+    pub proof: Option<PartialStorage>,
+    pub state_changes: Vec<RawStateChangesWithTrieKey>,
     /// Contracts accessed and deployed while applying the chunk.
     pub contract_updates: ContractUpdates,
+}
+
+impl ApplyResult {
+    pub fn finalize(self) -> (Self, ApplyResultFinalized) {
+        let shard_id_str = self.shard_id.to_string();
+        let state_update = self.state_update.take().expect("TODO");
+        let chunk_recorded_size_upper_bound =
+            state_update.trie.recorded_storage_size_upper_bound() as f64;
+        metrics::CHUNK_RECORDED_SIZE_UPPER_BOUND
+            .with_label_values(&[shard_id_str.as_str()])
+            .observe(chunk_recorded_size_upper_bound);
+        let TrieUpdateResult { trie, trie_changes, state_changes, contract_updates } =
+            state_update.finalize().expect("TODO");
+
+        let chunk_recorded_size = trie.recorded_storage_size() as f64;
+        metrics::CHUNK_RECORDED_SIZE
+            .with_label_values(&[shard_id_str.as_str()])
+            .observe(chunk_recorded_size);
+        metrics::CHUNK_RECORDED_SIZE_UPPER_BOUND_RATIO
+            .with_label_values(&[shard_id_str.as_str()])
+            .observe(chunk_recorded_size_upper_bound / f64::max(1.0, chunk_recorded_size));
+        metrics::report_recorded_column_sizes(&trie, self.shard_id, self.block_height);
+        let proof = trie.recorded_storage();
+
+        (
+            self,
+            ApplyResultFinalized {
+                state_root: trie_changes.new_root,
+                trie_changes,
+                proof,
+                state_changes,
+                contract_updates,
+            },
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -2186,14 +2248,6 @@ impl Runtime {
 
         state_update.commit(StateChangeCause::UpdatedDelayedReceipts);
         self.apply_state_patch(&mut state_update, state_patch);
-        let chunk_recorded_size_upper_bound =
-            state_update.trie.recorded_storage_size_upper_bound() as f64;
-        let shard_id_str = apply_state.shard_id.to_string();
-        metrics::CHUNK_RECORDED_SIZE_UPPER_BOUND
-            .with_label_values(&[shard_id_str.as_str()])
-            .observe(chunk_recorded_size_upper_bound);
-        let TrieUpdateResult { trie, trie_changes, state_changes, contract_updates } =
-            state_update.finalize()?;
 
         if let Some(prefetcher) = &processing_state.prefetcher {
             // Only clear the prefetcher queue after finalize is done because as part of receipt
@@ -2222,16 +2276,6 @@ impl Runtime {
             }
         }
 
-        let state_root = trie_changes.new_root;
-        let chunk_recorded_size = trie.recorded_storage_size() as f64;
-        metrics::CHUNK_RECORDED_SIZE
-            .with_label_values(&[shard_id_str.as_str()])
-            .observe(chunk_recorded_size);
-        metrics::CHUNK_RECORDED_SIZE_UPPER_BOUND_RATIO
-            .with_label_values(&[shard_id_str.as_str()])
-            .observe(chunk_recorded_size_upper_bound / f64::max(1.0, chunk_recorded_size));
-        metrics::report_recorded_column_sizes(&trie, &apply_state);
-        let proof = trie.recorded_storage();
         let processed_yield_timeouts = promise_yield_result.processed_yield_timeouts;
         let bandwidth_scheduler_state_hash =
             receipt_sink.bandwidth_scheduler_output().scheduler_state_hash;
@@ -2239,22 +2283,20 @@ impl Runtime {
         let outgoing_receipts =
             receipt_sink.finalize_stats_get_outgoing_receipts(&mut stats.receipt_sink);
         Ok(ApplyResult {
-            state_root,
-            trie_changes,
+            shard_id: apply_state.shard_id,
+            block_height: apply_state.block_height,
+            state_update: state_update.into(),
             validator_proposals: unique_proposals,
             outgoing_receipts,
             outcomes: processing_state.outcomes,
-            state_changes,
             stats,
             processed_delayed_receipts,
             processed_yield_timeouts,
-            proof,
             delayed_receipts_count,
             metrics: Some(processing_state.metrics),
             congestion_info: Some(own_congestion_info),
             bandwidth_requests,
             bandwidth_scheduler_state_hash,
-            contract_updates,
         })
     }
 }
@@ -2320,10 +2362,6 @@ fn missing_chunk_apply_result(
     processing_state: ApplyProcessingState,
     bandwidth_scheduler_output: &BandwidthSchedulerOutput,
 ) -> Result<ApplyResult, RuntimeError> {
-    let TrieUpdateResult { trie, trie_changes, state_changes, contract_updates } =
-        processing_state.state_update.finalize()?;
-    let proof = trie.recorded_storage();
-
     // For old chunks, copy the congestion info exactly as it came in,
     // potentially returning `None` even if the congestion control
     // feature is enabled for the protocol version.
@@ -2344,22 +2382,20 @@ fn missing_chunk_apply_result(
         .unwrap_or_else(BandwidthRequests::empty);
 
     return Ok(ApplyResult {
-        state_root: trie_changes.new_root,
-        trie_changes,
+        shard_id: processing_state.apply_state.shard_id,
+        block_height: processing_state.apply_state.block_height,
+        state_update: processing_state.state_update.into(),
         validator_proposals: vec![],
         outgoing_receipts: vec![],
         outcomes: vec![],
-        state_changes,
         stats: processing_state.stats,
         processed_delayed_receipts: vec![],
         processed_yield_timeouts: vec![],
-        proof,
         delayed_receipts_count: delayed_receipts.upper_bound_len(),
         metrics: None,
         congestion_info,
         bandwidth_requests: previous_bandwidth_requests,
         bandwidth_scheduler_state_hash: bandwidth_scheduler_output.scheduler_state_hash,
-        contract_updates,
     });
 }
 

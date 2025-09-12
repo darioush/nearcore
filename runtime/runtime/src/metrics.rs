@@ -1,4 +1,3 @@
-use crate::ApplyState;
 use crate::congestion_control::{ReceiptSink, ReceiptSinkV2WithInfo};
 use near_o11y::metrics::{
     Counter, CounterVec, GaugeVec, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
@@ -8,7 +7,7 @@ use near_o11y::metrics::{
 };
 use near_parameters::config::CongestionControlConfig;
 use near_primitives::congestion_info::CongestionInfo;
-use near_primitives::types::ShardId;
+use near_primitives::types::{BlockHeight, ShardId};
 use near_store::Trie;
 use near_store::trie::SubtreeSize;
 use std::sync::LazyLock;
@@ -801,19 +800,19 @@ fn report_outgoing_buffers(
     }
 }
 
-pub fn report_recorded_column_sizes(trie: &Trie, apply_state: &ApplyState) {
+pub fn report_recorded_column_sizes(trie: &Trie, shard_id: ShardId, block_height: BlockHeight) {
     // Tracing span to measure time spent on reporting column sizes.
     let _span = tracing::debug_span!(
             target: "runtime", "report_recorded_column_sizes",
-            shard_id = %apply_state.shard_id,
-            block_height = apply_state.block_height)
+            shard_id = %shard_id,
+            block_height = block_height)
     .entered();
     if near_o11y::metrics::config::expensive_metrics() {
         let Some(trie_recorder_stats) = trie.recorder_stats() else {
             return;
         };
         let mut total_size = SubtreeSize::default();
-        let shard_id_str = apply_state.shard_id.to_string();
+        let shard_id_str = shard_id.to_string();
         for column in &trie_recorder_stats.trie_column_sizes {
             let column_size = column.size.nodes_size.saturating_add(column.size.values_size);
             CHUNK_RECORDED_TRIE_COLUMN_SIZE
@@ -829,7 +828,7 @@ pub fn report_recorded_column_sizes(trie: &Trie, apply_state: &ApplyState) {
             .with_label_values(&[shard_id_str.as_str(), "values"])
             .observe(total_size.values_size as f64);
     } else {
-        let shard_id_str = apply_state.shard_id.to_string();
+        let shard_id_str = shard_id.to_string();
         CHUNK_RECORDED_TRIE_NODES_VALUES_SIZE
             .with_label_values(&[shard_id_str.as_str(), "values"])
             .observe(trie.recorded_storage_size() as f64);

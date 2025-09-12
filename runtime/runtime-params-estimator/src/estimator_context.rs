@@ -366,12 +366,13 @@ impl Testbed<'_> {
         let store = self.tries.store();
         let mut store_update = store.store_update();
         let shard_uid = ShardUId::single_shard();
-        self.root = self.tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+        let (apply_result, finalized) = apply_result.finalize();
+        self.root = self.tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
         if self.config.memtrie {
             let memtrie_root = self
                 .tries
                 .apply_memtrie_changes(
-                    &apply_result.trie_changes,
+                    &finalized.trie_changes,
                     shard_uid,
                     self.apply_state.block_height,
                 )
@@ -380,7 +381,7 @@ impl Testbed<'_> {
                 });
             assert_eq!(self.root, memtrie_root);
         }
-        near_store::flat::FlatStateChanges::from_state_changes(&apply_result.state_changes)
+        near_store::flat::FlatStateChanges::from_state_changes(&finalized.state_changes)
             .apply_to_flat_state(&mut store_update.flat_store_update(), shard_uid);
         store_update.commit().unwrap();
         self.apply_state.block_height += 1;

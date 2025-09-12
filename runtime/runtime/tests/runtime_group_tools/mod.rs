@@ -157,8 +157,9 @@ impl StandaloneRuntime {
             )
             .unwrap();
 
+        let (apply_result, finalized) = apply_result.finalize();
         let mut store_update = self.tries.store_update();
-        self.root = self.tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+        self.root = self.tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
         store_update.commit().unwrap();
         self.apply_state.block_height += 1;
 

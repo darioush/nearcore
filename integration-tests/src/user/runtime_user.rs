@@ -132,23 +132,20 @@ impl RuntimeUser {
                     RuntimeError::ReceiptValidationError(e) => panic!("{}", e),
                     RuntimeError::ValidatorError(e) => panic!("{}", e),
                 })?;
+            let (apply_result, finalized) = apply_result.finalize();
             for outcome_with_id in apply_result.outcomes {
                 self.transaction_results
                     .borrow_mut()
                     .insert(outcome_with_id.id, outcome_with_id.outcome.into());
             }
             let mut update = client.tries.store_update();
-            client.tries.apply_all(
-                &apply_result.trie_changes,
-                ShardUId::single_shard(),
-                &mut update,
-            );
+            client.tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut update);
             if use_flat_storage {
-                near_store::flat::FlatStateChanges::from_state_changes(&apply_result.state_changes)
+                near_store::flat::FlatStateChanges::from_state_changes(&finalized.state_changes)
                     .apply_to_flat_state(&mut update.flat_store_update(), ShardUId::single_shard());
             }
             update.commit().unwrap();
-            client.state_root = apply_result.state_root;
+            client.state_root = finalized.state_root;
             for receipt in &apply_result.outgoing_receipts {
                 self.receipts.borrow_mut().insert(*receipt.receipt_id(), receipt.clone());
             }

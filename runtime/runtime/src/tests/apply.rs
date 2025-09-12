@@ -4,7 +4,7 @@ use crate::tests::{
     MAX_ATTACHED_GAS, create_receipt_for_create_account, create_receipt_with_actions,
     set_sha256_cost,
 };
-use crate::{ApplyResult, ApplyState, Runtime, ValidatorAccountsUpdate};
+use crate::{ApplyResult, ApplyResultFinalized, ApplyState, Runtime, ValidatorAccountsUpdate};
 use crate::{SignedValidPeriodTransactions, total_prepaid_exec_fees};
 use assert_matches::assert_matches;
 use near_crypto::{InMemorySigner, KeyType, PublicKey, Signer};
@@ -264,7 +264,8 @@ fn test_apply_refund_receipts() {
                 Default::default(),
             )
             .unwrap();
-        root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+        let (apply_result, finalized) = apply_result.finalize();
+        root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
         let state = tries.new_trie_update(shard_uid, root);
         let account = get_account(&state, &alice_account()).unwrap().unwrap();
         let capped_i = std::cmp::min(i, n);
@@ -308,7 +309,8 @@ fn test_apply_delayed_receipts_feed_all_at_once() {
                 Default::default(),
             )
             .unwrap();
-        root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+        let (apply_result, finalized) = apply_result.finalize();
+        root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
 
         let state = tries.new_trie_update(shard_uid, root);
         let account = get_account(&state, &alice_account()).unwrap().unwrap();
@@ -362,7 +364,8 @@ fn test_apply_delayed_receipts_add_more_using_chunks() {
                 Default::default(),
             )
             .unwrap();
-        root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+        let (apply_result, finalized) = apply_result.finalize();
+        root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
         let state = tries.new_trie_update(shard_uid, root);
         let account = get_account(&state, &alice_account()).unwrap().unwrap();
         let capped_i = std::cmp::min(i * 3, n);
@@ -424,7 +427,8 @@ fn test_apply_delayed_receipts_adjustable_gas_limit() {
                 Default::default(),
             )
             .unwrap();
-        root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+        let (apply_result, finalized) = apply_result.finalize();
+        root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
         let state = tries.new_trie_update(shard_uid, root);
         num_receipts_processed += apply_result.outcomes.len() as u64;
         let account = get_account(&state, &alice_account()).unwrap().unwrap();
@@ -589,7 +593,8 @@ fn test_apply_delayed_receipts_local_tx() {
             Default::default(),
         )
         .unwrap();
-    root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+    let (apply_result, finalized) = apply_result.finalize();
+    root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
 
     assert_eq!(
         apply_result.outcomes.iter().map(|o| o.id).collect::<Vec<_>>(),
@@ -629,8 +634,9 @@ fn test_apply_delayed_receipts_local_tx() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
-    let root = tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+    let root = tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
     store_update.commit().unwrap();
 
     assert_eq!(
@@ -665,8 +671,9 @@ fn test_apply_delayed_receipts_local_tx() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
-    let root = tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+    let root = tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
     store_update.commit().unwrap();
 
     assert_eq!(
@@ -707,8 +714,9 @@ fn test_apply_delayed_receipts_local_tx() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
-    let root = tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+    let root = tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
     store_update.commit().unwrap();
 
     assert_eq!(
@@ -1130,9 +1138,10 @@ fn test_delete_key_add_key() {
             Default::default(),
         )
         .unwrap();
+    let (_apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let state_update = tries.new_trie_update(ShardUId::single_shard(), root);
@@ -1177,9 +1186,10 @@ fn test_delete_key_underflow() {
             Default::default(),
         )
         .unwrap();
+    let (_apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let state_update = tries.new_trie_update(ShardUId::single_shard(), root);
@@ -1219,8 +1229,9 @@ fn test_contract_precompilation() {
             Default::default(),
         )
         .unwrap();
+    let (_apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
-    tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+    tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let contract_code = near_vm_runner::ContractCode::new(wasm_code, None);
@@ -1296,7 +1307,8 @@ fn test_compute_usage_limit() {
             Default::default(),
         )
         .unwrap();
-    root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+    let (apply_result, finalized) = apply_result.finalize();
+    root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
 
     // Only first two receipts should fit into the chunk due to the compute usage limit.
     assert_eq!(apply_result.delayed_receipts_count, 1);
@@ -1420,10 +1432,11 @@ fn test_main_storage_proof_size_soft_limit() {
         .unwrap();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
+    let (_apply_result, finalized) = apply_result.finalize();
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     // Change main_storage_proof_size_soft_limit to the storage size in order to let
@@ -1466,12 +1479,13 @@ fn test_main_storage_proof_size_soft_limit() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     // We expect function_call_fn(bob_account()) to be in delayed receipts
     assert_eq!(apply_result.delayed_receipts_count, 1);
 
     // Since contracts are excluded from the partial state, we will get missing trie error below.
-    let partial_storage = apply_result.proof.unwrap();
+    let partial_storage = finalized.proof.unwrap();
     let storage = Trie::from_recorded_storage(partial_storage, root, false);
     let code_key = TrieKey::ContractCode { account_id: alice_account() };
     assert_matches!(
@@ -1535,18 +1549,19 @@ fn test_exclude_contract_code_from_witness() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     // Since both accounts deploy the same contract, we expect only one contract deploy.
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let function_call_fn = |account_id: AccountId, signer: Arc<Signer>| {
@@ -1577,6 +1592,7 @@ fn test_exclude_contract_code_from_witness() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     // We expect that both receipts are included since the contract code is not included in the storage proof.
     assert_eq!(apply_result.delayed_receipts_count, 0);
@@ -1584,13 +1600,13 @@ fn test_exclude_contract_code_from_witness() {
     assert_eq!(apply_result.delayed_receipts_count, 0);
     // Since both accounts call the same contract, we expect only one contract access.
     assert_eq!(
-        apply_result.contract_updates.contract_accesses,
+        finalized.contract_updates.contract_accesses,
         HashSet::from([CodeHash(*contract_code.hash())])
     );
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 
     // Check that the proof size is less than the contract size (since it is not included in the storage proof).
-    let partial_storage = apply_result.proof.unwrap();
+    let partial_storage = finalized.proof.unwrap();
     let PartialState::TrieValues(storage_proof) = partial_storage.nodes.clone();
     let total_size: usize = storage_proof.iter().map(|v| v.len()).sum();
     assert!(total_size < CONTRACT_SIZE);
@@ -1655,18 +1671,19 @@ fn test_exclude_contract_code_from_witness_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     // Since both accounts deploy the same contract, we expect only one contract deploy.
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let function_call_fn = |account_id: AccountId, signer: Arc<Signer>| {
@@ -1696,17 +1713,18 @@ fn test_exclude_contract_code_from_witness_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 1);
     // Since both accounts call the same contract, we expect only one contract access.
     assert_eq!(
-        apply_result.contract_updates.contract_accesses,
+        finalized.contract_updates.contract_accesses,
         HashSet::from([CodeHash(*contract_code.hash())])
     );
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 
     // Check that both contracts are excluded from the storage proof.
-    let partial_storage = apply_result.proof.unwrap();
+    let partial_storage = finalized.proof.unwrap();
     let storage = Trie::from_recorded_storage(partial_storage, root, false);
     let code_key = TrieKey::ContractCode { account_id: alice_account() };
     assert_matches!(
@@ -1792,11 +1810,12 @@ fn test_deploy_and_call_different_contracts() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([
             CodeHash(*first_contract_code.hash()),
             CodeHash(*second_contract_code.hash())
@@ -1805,7 +1824,7 @@ fn test_deploy_and_call_different_contracts() {
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let apply_result = runtime
@@ -1819,16 +1838,17 @@ fn test_deploy_and_call_different_contracts() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
     assert_eq!(
-        apply_result.contract_updates.contract_accesses,
+        finalized.contract_updates.contract_accesses,
         HashSet::from([
             CodeHash(*first_contract_code.hash()),
             CodeHash(*second_contract_code.hash())
         ])
     );
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 }
 
 // Similar to test_deploy_and_call_different_contracts, but one of the function calls fails.
@@ -1898,11 +1918,12 @@ fn test_deploy_and_call_different_contracts_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([
             CodeHash(*first_contract_code.hash()),
             CodeHash(*second_contract_code.hash())
@@ -1911,7 +1932,7 @@ fn test_deploy_and_call_different_contracts_with_failed_call() {
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let apply_result = runtime
@@ -1925,14 +1946,15 @@ fn test_deploy_and_call_different_contracts_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 1);
     // Since the second call fails due to insufficient gas, only the first call is recorded.
     assert_eq!(
-        apply_result.contract_updates.contract_accesses,
+        finalized.contract_updates.contract_accesses,
         HashSet::from([CodeHash(*first_contract_code.hash())])
     );
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 }
 
 // Tests excluding contract code from state witness and recording of contract deployments and function calls
@@ -2002,11 +2024,12 @@ fn test_deploy_and_call_in_apply() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([
             CodeHash(*first_contract_code.hash()),
             CodeHash(*second_contract_code.hash())
@@ -2081,12 +2104,13 @@ fn test_deploy_and_call_in_apply_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 1);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     // We record both deployments even if the function call to one of them fails.
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([
             CodeHash(*first_contract_code.hash()),
             CodeHash(*second_contract_code.hash())
@@ -2136,18 +2160,19 @@ fn test_deploy_existing_contract_to_different_account() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
     // No contract access is recorded because it was newly deployed.
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     // Second deploy the contract to Bob account and call it.
@@ -2181,10 +2206,10 @@ fn test_deploy_existing_contract_to_different_account() {
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
     // No contract access is recorded because it was newly deployed.
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     // The contract deployment is still recorded even if it was deployed to another account before.
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 }
@@ -2227,11 +2252,12 @@ fn test_deploy_and_call_in_same_receipt() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash()),])
     );
 }
@@ -2276,10 +2302,11 @@ fn test_deploy_and_call_in_same_receipt_with_failed_call() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 }
 
 // Tests the case in which a function call is made to an account with no contract deployed.
@@ -2316,10 +2343,11 @@ fn test_call_account_without_contract() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 }
 
 /// Tests that we do not record the contract accesses when validating the chunk.
@@ -2364,16 +2392,17 @@ fn test_contract_accesses_when_validating_chunk() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     // Apply chunk for updating the shard, so the contract accesses are recorded.
@@ -2390,10 +2419,11 @@ fn test_contract_accesses_when_validating_chunk() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
     assert_eq!(
-        apply_result.contract_updates.contract_accesses,
+        finalized.contract_updates.contract_accesses,
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
@@ -2411,9 +2441,10 @@ fn test_contract_accesses_when_validating_chunk() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
 }
 
 /// Tests that the existing contract is not recorded in the state witness for a deploy-contract action.
@@ -2462,17 +2493,18 @@ fn test_exclude_existing_contract_code_for_deploy_action() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code1.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let apply_result = runtime
@@ -2486,15 +2518,16 @@ fn test_exclude_existing_contract_code_for_deploy_action() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code2.hash())])
     );
 
-    let partial_storage = apply_result.proof.unwrap();
+    let partial_storage = finalized.proof.unwrap();
     let PartialState::TrieValues(storage_proof) = partial_storage.nodes;
     let total_size: usize = storage_proof.iter().map(|v| v.len()).sum();
     // Contract size is much larger than the rest of the storage proof, so we compare them to check if the contract is excluded.
@@ -2567,17 +2600,18 @@ fn test_exclude_existing_contract_code_for_delete_account_action() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
     assert_eq!(
-        apply_result.contract_updates.contract_deploy_hashes(),
+        finalized.contract_updates.contract_deploy_hashes(),
         HashSet::from([CodeHash(*contract_code.hash())])
     );
 
     let mut store_update = tries.store_update();
     let root =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     store_update.commit().unwrap();
 
     let apply_result = runtime
@@ -2591,12 +2625,13 @@ fn test_exclude_existing_contract_code_for_delete_account_action() {
             Default::default(),
         )
         .unwrap();
+    let (apply_result, finalized) = apply_result.finalize();
 
     assert_eq!(apply_result.delayed_receipts_count, 0);
-    assert_eq!(apply_result.contract_updates.contract_accesses, HashSet::new());
-    assert_eq!(apply_result.contract_updates.contract_deploy_hashes(), HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_accesses, HashSet::new());
+    assert_eq!(finalized.contract_updates.contract_deploy_hashes(), HashSet::new());
 
-    let partial_storage = apply_result.proof.unwrap();
+    let partial_storage = finalized.proof.unwrap();
     let PartialState::TrieValues(storage_proof) = partial_storage.nodes;
     let total_size: usize = storage_proof.iter().map(|v| v.len()).sum();
     // Contract size is much larger than the rest of the storage proof, so we compare them to check if the contract is excluded.
@@ -2646,9 +2681,10 @@ fn test_empty_apply() {
             Default::default(),
         )
         .unwrap();
+    let (_apply_result, finalized) = apply_result.finalize();
     let mut store_update = tries.store_update();
     let root_after =
-        tries.apply_all(&apply_result.trie_changes, ShardUId::single_shard(), &mut store_update);
+        tries.apply_all(&finalized.trie_changes, ShardUId::single_shard(), &mut store_update);
     assert!(root_before != root_after, "state root not changed - did the bandwidth scheduler run?");
 }
 
@@ -2794,8 +2830,9 @@ fn test_congestion_buffering() {
                 .congestion_info
                 .insert(local_shard, ExtendedCongestionInfo::new(congestion_info, 0));
         }
+        let (apply_result, finalized) = apply_result.finalize();
         let mut store_update = tries.store_update();
-        root = tries.apply_all(&apply_result.trie_changes, local_shard_uid, &mut store_update);
+        root = tries.apply_all(&finalized.trie_changes, local_shard_uid, &mut store_update);
         store_update.commit().unwrap();
 
         // (a) check receipts are held back in buffer
@@ -2855,7 +2892,14 @@ fn test_congestion_buffering() {
                 Default::default(),
             )
             .unwrap();
-        root = commit_apply_result(&apply_result, &mut apply_state, &tries, local_shard_uid);
+        let (apply_result, finalized) = apply_result.finalize();
+        root = commit_apply_result(
+            &apply_result,
+            &finalized,
+            &mut apply_state,
+            &tries,
+            local_shard_uid,
+        );
 
         let state = tries.get_trie_for_shard(local_shard_uid, root);
         let buffers = ShardsOutgoingReceiptBuffer::load(&state).unwrap();
@@ -2882,6 +2926,7 @@ fn test_congestion_buffering() {
 // congestion info for the next call to apply().
 fn commit_apply_result(
     apply_result: &ApplyResult,
+    finalized: &ApplyResultFinalized,
     apply_state: &mut ApplyState,
     tries: &ShardTries,
     shard_uid: ShardUId,
@@ -2893,7 +2938,7 @@ fn commit_apply_result(
         apply_state.congestion_info.insert(shard_uid.shard_id(), extended);
     }
     let mut store_update = tries.store_update();
-    let root = tries.apply_all(&apply_result.trie_changes, shard_uid, &mut store_update);
+    let root = tries.apply_all(&finalized.trie_changes, shard_uid, &mut store_update);
     store_update.commit().unwrap();
     return root;
 }
@@ -3265,6 +3310,7 @@ fn test_transaction_multiple_access_keys_with_apply() {
             Default::default(),
         )
         .expect("apply should succeed");
+    let (apply_result, finalized) = apply_result.finalize();
 
     let expected_order = txs.iter().map(|tx| tx.get_hash()).collect::<Vec<_>>();
 
@@ -3273,7 +3319,7 @@ fn test_transaction_multiple_access_keys_with_apply() {
     assert_eq!(tx_outcomes, expected_order, "outcomes are not in expected sorted order");
 
     let shard_uid = ShardUId::single_shard();
-    let root = commit_apply_result(&apply_result, &mut apply_state, &tries, shard_uid);
+    let root = commit_apply_result(&apply_result, &finalized, &mut apply_state, &tries, shard_uid);
     let state = tries.new_trie_update(shard_uid, root);
     let account = get_account(&state, &alice_account()).unwrap().unwrap();
 

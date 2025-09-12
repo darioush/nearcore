@@ -283,6 +283,7 @@ impl NightshadeRuntime {
                 RuntimeError::ReceiptValidationError(e) => panic!("{}", e),
                 RuntimeError::ValidatorError(e) => e.into(),
             })?;
+        let (apply_result, finalized) = apply_result.finalize();
         let elapsed = instant.elapsed();
 
         let total_gas_burnt = apply_result
@@ -316,24 +317,24 @@ impl NightshadeRuntime {
             trie_changes: WrappedTrieChanges::new(
                 self.get_tries(),
                 shard_uid,
-                apply_result.trie_changes,
-                apply_result.state_changes,
+                finalized.trie_changes,
+                finalized.state_changes,
                 apply_state.block_height,
             ),
-            new_root: apply_result.state_root,
+            new_root: finalized.state_root,
             outcomes: apply_result.outcomes,
             outgoing_receipts: apply_result.outgoing_receipts,
             validator_proposals: apply_result.validator_proposals,
             total_gas_burnt,
             total_balance_burnt,
-            proof: apply_result.proof,
+            proof: finalized.proof,
             processed_delayed_receipts: apply_result.processed_delayed_receipts,
             processed_yield_timeouts: apply_result.processed_yield_timeouts,
             applied_receipts_hash: hash(&borsh::to_vec(receipts).unwrap()),
             congestion_info: apply_result.congestion_info,
             bandwidth_requests: apply_result.bandwidth_requests,
             bandwidth_scheduler_state_hash: apply_result.bandwidth_scheduler_state_hash,
-            contract_updates: apply_result.contract_updates,
+            contract_updates: finalized.contract_updates,
             stats: apply_result.stats,
         };
 
