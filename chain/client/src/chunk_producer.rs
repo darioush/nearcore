@@ -323,7 +323,12 @@ impl ChunkProducer {
                             num_txs = txs.transactions.len(),
                             "Using cached prepared transactions",
                         );
-                        if is_resharding { None } else { Some(txs.clone()) }
+                        // XXX: If it's empty, maybe just try mempool again?
+                        if is_resharding || txs.transactions.is_empty() {
+                            None
+                        } else {
+                            Some(txs.clone())
+                        }
                     }
                     Err(err) => {
                         tracing::error!("Error preparing txs! {:?}", err);

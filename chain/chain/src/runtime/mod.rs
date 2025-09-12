@@ -694,6 +694,11 @@ impl RuntimeAdapter for NightshadeRuntime {
                 result.limited_by = Some(PrepareTransactionsLimit::Size);
                 break;
             }
+            // XXX: Hardcode this for now as experiment, will just show it as Gas
+            if result.transactions.len() >= 15_000 {
+                result.limited_by = Some(PrepareTransactionsLimit::Gas);
+                break;
+            }
 
             if let Some(time_limit) = &time_limit {
                 if start_time.elapsed() >= *time_limit {
@@ -794,7 +799,7 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
             }
         }
-        debug!(target: "runtime", limited_by=?result.limited_by, "Transaction filtering results {} valid out of {} pulled from the pool", result.transactions.len(), num_checked_transactions);
+        tracing::warn!(target: "runtime", limited_by=?result.limited_by, "Transaction filtering results {} valid out of {} pulled from the pool", result.transactions.len(), num_checked_transactions);
         let shard_label = shard_id.to_string();
         metrics::PREPARE_TX_SIZE.with_label_values(&[&shard_label]).observe(total_size as f64);
         metrics::PREPARE_TX_REJECTED
