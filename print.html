@@ -5803,16 +5803,16 @@ using a loop rather than those methods, for example:</p>
 </span><span class="boring">fn main() {
 </span>// GOOD
 for outcome_with_id in result? {
-    *total_gas_burnt =
-        safe_add_gas(*total_gas_burnt, outcome_with_id.outcome.gas_burnt)?;
+    *total_gas_burnt = total_gas_burnt
+        .checked_add_result(outcome_with_id.outcome.gas_burnt)?;
     outcomes.push(outcome_with_id);
 }
 
 // BAD
 result?.into_iter().try_for_each(
     |outcome_with_id: ExecutionOutcomeWithId| -&gt; Result&lt;(), RuntimeError&gt; {
-        *total_gas_burnt =
-            safe_add_gas(*total_gas_burnt, outcome_with_id.outcome.gas_burnt)?;
+        *total_gas_burnt = total_gas_burnt
+            .checked_add_result(outcome_with_id.outcome.gas_burnt)?;
         outcomes.push(outcome_with_id);
         Ok(())
     },
@@ -6477,8 +6477,8 @@ back to the client, which allows for testing relatively complex scenarios. The
 tests generally expect a particular message to occur, in this case, the tests
 expect two blocks to be produced. <code>near_async::shutdown_all_actors();</code> is the way to
 stop the test and mark it as passed.</li>
-<li><code>near_network::test_utils::wait_or_panic(5000);</code> is how the timeout for the
-test is set (in milliseconds).</li>
+<li>See <code>near_network::test_utils::wait_or_timeout</code> for how to wait for some condition
+to be true or panic if it doesn't within a certain time.</li>
 </ol>
 <p>For an example of a test that launches multiple nodes, see
 <code>chunks_produced_and_distributed_common</code> in
