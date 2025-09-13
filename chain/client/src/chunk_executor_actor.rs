@@ -17,6 +17,7 @@ use near_chain::sharding::shuffle_receipt_proofs;
 use near_chain::spice_core::CoreStatementsProcessor;
 use near_chain::spice_core::ExecutionResultEndorsed;
 use near_chain::types::ApplyChunkResult;
+use near_chain::types::ApplyChunkResultFinalized;
 use near_chain::types::{ApplyChunkBlockContext, RuntimeAdapter, StorageDataSource};
 use near_chain::update_shard::{ShardUpdateReason, ShardUpdateResult, process_shard_update};
 use near_chain::{
@@ -472,6 +473,7 @@ impl ChunkExecutorActor {
         outgoing_receipts_root: CryptoHash,
     ) -> Result<(), Error> {
         let NewChunkResult { shard_uid, gas_limit, apply_result } = new_chunk_result;
+        let finalized = apply_result.finalize();
         let shard_id = shard_uid.shard_id();
         let epoch_id = block.header().epoch_id();
         let shard_layout = self.epoch_manager.get_shard_layout(epoch_id)?;
@@ -485,7 +487,7 @@ impl ChunkExecutorActor {
             .contains(my_signer.validator_id())
         {
             let execution_result =
-                new_execution_result(gas_limit, apply_result, outgoing_receipts_root);
+                new_execution_result(gas_limit, &apply_result, &finalized, outgoing_receipts_root);
             // If we're validator we can send endorsement without witness validation.
             let endorsement = ChunkEndorsement::new_with_execution_result(
                 *epoch_id,
@@ -507,7 +509,8 @@ impl ChunkExecutorActor {
 
         let state_witness = self.create_witness(
             block,
-            apply_result,
+            &apply_result,
+            &finalized,
             my_signer.validator_id().clone(),
             chunk_header,
         )?;
@@ -524,6 +527,7 @@ impl ChunkExecutorActor {
         &self,
         block: &Block,
         apply_result: &ApplyChunkResult,
+        finalized: &ApplyChunkResultFinalized,
         me: AccountId,
         chunk_header: &ShardChunkHeader,
     ) -> Result<ChunkStateWitness, Error> {
@@ -535,10 +539,10 @@ impl ChunkExecutorActor {
         let applied_receipts_hash = apply_result.applied_receipts_hash;
         let main_transition = {
             let ContractUpdates { contract_accesses, contract_deploys: _ } =
-                apply_result.contract_updates.clone();
+                finalized.contract_updates.clone();
 
             let PartialState::TrieValues(mut base_state_values) =
-                apply_result.proof.clone().unwrap().nodes;
+                finalized.proof.clone().unwrap().nodes;
             let trie_storage = TrieDBStorage::new(
                 TrieStoreAdapter::new(self.runtime_adapter.store().clone()),
                 shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, &epoch_id)?,
@@ -551,7 +555,7 @@ impl ChunkExecutorActor {
             ChunkStateTransition {
                 block_hash: *block_hash,
                 base_state: PartialState::TrieValues(base_state_values),
-                post_state_root: apply_result.new_root,
+                post_state_root: finalized.new_root,
             }
         };
         let source_receipt_proofs: HashMap<ChunkHash, ReceiptProof> = {
@@ -726,11 +730,12 @@ impl ChunkExecutorActor {
 fn new_execution_result(
     gas_limit: &Gas,
     apply_result: &ApplyChunkResult,
+    finalized: &ApplyChunkResultFinalized,
     outgoing_receipts_root: CryptoHash,
 ) -> ChunkExecutionResult {
     let (outcome_root, _) = ApplyChunkResult::compute_outcomes_proof(&apply_result.outcomes);
     let chunk_extra = ChunkExtra::new(
-        &apply_result.new_root,
+        &finalized.new_root,
         outcome_root,
         apply_result.validator_proposals.clone(),
         apply_result.total_gas_burnt,

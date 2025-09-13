@@ -198,7 +198,7 @@ impl From<TrieUpdate> for StateUpdateHolder {
 }
 
 impl StateUpdateHolder {
-    fn take(&self) -> Option<TrieUpdate> {
+    pub fn take(&self) -> Option<TrieUpdate> {
         self.0.lock().take()
     }
 }

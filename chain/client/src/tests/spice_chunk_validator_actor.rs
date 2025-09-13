@@ -479,10 +479,11 @@ fn test_chunk_state_transition(
             transactions,
         )
         .unwrap();
+    let finalized = apply_result.finalize();
     ChunkStateTransition {
         block_hash: *block.hash(),
-        base_state: apply_result.proof.unwrap().nodes,
-        post_state_root: apply_result.new_root,
+        base_state: finalized.proof.unwrap().nodes,
+        post_state_root: finalized.new_root,
     }
 }
 

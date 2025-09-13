@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use near_chain::{
     Block, BlockHeader, ChainStore, ChainStoreAccess,
-    types::{ApplyChunkResult, Tip},
+    types::{ApplyChunkResult, ApplyChunkResultFinalized, Tip},
 };
 use near_epoch_manager::{
     EpochManager, EpochManagerAdapter, EpochManagerHandle, shard_assignment::shard_id_to_uid,
@@ -141,17 +141,24 @@ fn chunk_extras_equal(l: &ChunkExtra, r: &ChunkExtra) -> bool {
     l.validator_proposals().collect::<Vec<_>>() == r.validator_proposals().collect::<Vec<_>>()
 }
 
-pub fn resulting_chunk_extra(result: &ApplyChunkResult, gas_limit: Gas) -> ChunkExtra {
+pub fn resulting_chunk_extra(
+    result: &ApplyChunkResult,
+    gas_limit: Gas,
+) -> (ChunkExtra, ApplyChunkResultFinalized) {
     let (outcome_root, _) = ApplyChunkResult::compute_outcomes_proof(&result.outcomes);
-    ChunkExtra::new(
-        &result.new_root,
-        outcome_root,
-        result.validator_proposals.clone(),
-        result.total_gas_burnt,
-        gas_limit,
-        result.total_balance_burnt,
-        result.congestion_info,
-        result.bandwidth_requests.clone(),
+    let finalized = result.finalize();
+    (
+        ChunkExtra::new(
+            &finalized.new_root,
+            outcome_root,
+            result.validator_proposals.clone(),
+            result.total_gas_burnt,
+            gas_limit,
+            result.total_balance_burnt,
+            result.congestion_info,
+            result.bandwidth_requests.clone(),
+        ),
+        finalized,
     )
 }
 
@@ -161,13 +168,13 @@ pub fn check_apply_block_result(
     epoch_manager: &EpochManagerHandle,
     chain_store: &ChainStore,
     shard_id: ShardId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ApplyChunkResultFinalized> {
     let height = block.header().height();
     let block_hash = block.header().hash();
     let epoch_id = block.header().epoch_id();
     let shard_layout = epoch_manager.get_shard_layout(epoch_id).unwrap();
     let shard_index = shard_layout.get_shard_index(shard_id).map_err(Into::<EpochError>::into)?;
-    let new_chunk_extra =
+    let (new_chunk_extra, finalized) =
         resulting_chunk_extra(apply_result, block.chunks()[shard_index].gas_limit());
     println!(
         "apply chunk for shard {} at height {}, resulting chunk extra {:?}",
@@ -178,7 +185,7 @@ pub fn check_apply_block_result(
         if let Ok(old_chunk_extra) = chain_store.get_chunk_extra(block_hash, &shard_uid) {
             if chunk_extras_equal(&new_chunk_extra, old_chunk_extra.as_ref()) {
                 tracing::debug!("new chunk extra matches old chunk extra");
-                Ok(())
+                Ok(finalized)
             } else {
                 Err(anyhow::anyhow!(
                     "mismatch in resulting chunk extra.\nold: {:?}\nnew: {:?}",
@@ -191,6 +198,6 @@ pub fn check_apply_block_result(
         }
     } else {
         tracing::warn!("No existing chunk extra available");
-        Ok(())
+        Ok(finalized)
     }
 }

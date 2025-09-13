@@ -268,12 +268,13 @@ impl TestEnv {
         transactions: Vec<SignedTransaction>,
         receipts: &[Receipt],
     ) -> (CryptoHash, Vec<ValidatorStake>, Vec<Receipt>) {
-        let mut apply_result = self.apply_new_chunk(shard_id, transactions, receipts);
+        let apply_result = self.apply_new_chunk(shard_id, transactions, receipts);
+        let mut finalized = apply_result.finalize();
         let mut store_update = self.runtime.store().store_update();
         let flat_state_changes =
-            FlatStateChanges::from_state_changes(&apply_result.trie_changes.state_changes());
-        apply_result.trie_changes.insertions_into(&mut store_update.trie_store_update());
-        apply_result
+            FlatStateChanges::from_state_changes(&finalized.trie_changes.state_changes());
+        finalized.trie_changes.insertions_into(&mut store_update.trie_store_update());
+        finalized
             .trie_changes
             .state_changes_into(&new_block_hash, &mut store_update.trie_store_update());
 
@@ -300,7 +301,7 @@ impl TestEnv {
         }
         store_update.commit().unwrap();
 
-        (apply_result.new_root, apply_result.validator_proposals, apply_result.outgoing_receipts)
+        (finalized.new_root, apply_result.validator_proposals, apply_result.outgoing_receipts)
     }
 
     pub fn step(&mut self, transactions: Vec<Vec<SignedTransaction>>, chunk_mask: Vec<bool>) {
@@ -1514,7 +1515,8 @@ fn test_storage_proof_garbage() {
         priority: 0,
     });
     let apply_result = env.apply_new_chunk(shard_id, vec![], &[receipt]);
-    let PartialState::TrieValues(storage_proof) = apply_result.proof.unwrap().nodes;
+    let finalized = apply_result.finalize();
+    let PartialState::TrieValues(storage_proof) = finalized.proof.unwrap().nodes;
     let total_size: usize = storage_proof.iter().map(|v| v.len()).sum();
     assert_eq!(total_size / 1000_000, garbage_size_mb);
 }

@@ -39,10 +39,12 @@ use near_primitives::version::{MIN_GAS_PRICE_NEP_92_FIX, ProtocolVersion};
 use near_primitives::views::{QueryRequest, QueryResponse};
 use near_schema_checker_lib::ProtocolSchema;
 use near_store::flat::FlatStorageManager;
+use near_store::trie::update::TrieUpdateResult;
 use near_store::{PartialStorage, ShardTries, Store, Trie, WrappedTrieChanges};
 use near_vm_runner::ContractCode;
 use near_vm_runner::ContractRuntimeCache;
 use node_runtime::SignedValidPeriodTransactions;
+use node_runtime::StateUpdateHolder;
 use num_rational::Rational32;
 use tracing::instrument;
 
@@ -88,14 +90,15 @@ pub struct AcceptedBlock {
 
 #[derive(Debug)]
 pub struct ApplyChunkResult {
-    pub trie_changes: WrappedTrieChanges,
-    pub new_root: StateRoot,
+    pub shard_uid: ShardUId,
+    pub block_height: BlockHeight,
+    pub tries: ShardTries,
+    pub state_update: StateUpdateHolder,
     pub outcomes: Vec<ExecutionOutcomeWithId>,
     pub outgoing_receipts: Vec<Receipt>,
     pub validator_proposals: Vec<ValidatorStake>,
     pub total_gas_burnt: Gas,
     pub total_balance_burnt: Balance,
-    pub proof: Option<PartialStorage>,
     pub processed_delayed_receipts: Vec<Receipt>,
     pub processed_yield_timeouts: Vec<PromiseYieldTimeout>,
     /// Hash of Vec<Receipt> which were applied in a chunk, later used for
@@ -111,10 +114,17 @@ pub struct ApplyChunkResult {
     pub bandwidth_requests: BandwidthRequests,
     /// Used only for a sanity check.
     pub bandwidth_scheduler_state_hash: CryptoHash,
-    /// Contracts accessed and deployed while applying the chunk.
-    pub contract_updates: ContractUpdates,
     /// Extra information gathered during chunk application.
     pub stats: ChunkApplyStatsV0,
+}
+
+#[derive(Debug)]
+pub struct ApplyChunkResultFinalized {
+    pub trie_changes: WrappedTrieChanges,
+    pub new_root: StateRoot,
+    pub proof: Option<PartialStorage>,
+    /// Contracts accessed and deployed while applying the chunk.
+    pub contract_updates: ContractUpdates,
 }
 
 impl ApplyChunkResult {
@@ -130,6 +140,29 @@ impl ApplyChunkResult {
             result.push(outcome_with_id.to_hashes());
         }
         merklize(&result)
+    }
+
+    pub fn finalize(&self) -> ApplyChunkResultFinalized {
+        let result = self.state_update.take().expect("TODO");
+        let TrieUpdateResult { trie, trie_changes, state_changes, contract_updates } =
+            result.finalize().expect("TODO");
+
+        let block_height = self.block_height;
+        let shard_uid = self.shard_uid;
+        let tries = self.tries.clone();
+        let new_root = trie_changes.new_root;
+        ApplyChunkResultFinalized {
+            trie_changes: WrappedTrieChanges::new(
+                tries,
+                shard_uid,
+                trie_changes,
+                state_changes,
+                block_height,
+            ),
+            new_root,
+            proof: trie.recorded_storage(),
+            contract_updates,
+        }
     }
 }
 

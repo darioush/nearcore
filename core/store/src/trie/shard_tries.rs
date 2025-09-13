@@ -60,6 +60,12 @@ struct ShardTriesInner {
 #[derive(Clone)]
 pub struct ShardTries(Arc<ShardTriesInner>);
 
+impl std::fmt::Debug for ShardTries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ShardTries {{ ... }}")
+    }
+}
+
 impl ShardTries {
     pub fn new(
         store: TrieStoreAdapter,

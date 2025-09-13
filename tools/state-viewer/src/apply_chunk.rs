@@ -2,7 +2,8 @@ use anyhow::{Context, anyhow};
 use borsh::BorshDeserialize;
 use near_chain::chain::collect_receipts_from_response;
 use near_chain::types::{
-    ApplyChunkBlockContext, ApplyChunkResult, ApplyChunkShardContext, BlockType, RuntimeAdapter,
+    ApplyChunkBlockContext, ApplyChunkResult, ApplyChunkResultFinalized, ApplyChunkShardContext,
+    BlockType, RuntimeAdapter,
 };
 use near_chain::{ChainStore, ChainStoreAccess, ReceiptFilter, get_incoming_receipts_for_shard};
 use near_epoch_manager::shard_assignment::shard_id_to_uid;
@@ -240,7 +241,7 @@ fn apply_tx_in_block(
     tx_hash: &CryptoHash,
     block_hash: CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<ApplyChunkResult> {
+) -> anyhow::Result<(ApplyChunkResult, ApplyChunkResultFinalized)> {
     match find_tx_or_receipt(tx_hash, &block_hash, epoch_manager, chain_store)? {
         Some((hash_type, shard_id)) => match hash_type {
             HashType::Tx => {
@@ -259,14 +260,14 @@ fn apply_tx_in_block(
                     chain_store,
                     storage,
                 );
-                check_apply_block_result(
+                let finalized = check_apply_block_result(
                     &block,
                     &apply_result,
                     epoch_manager,
                     chain_store,
                     shard_id,
                 )?;
-                Ok(apply_result)
+                Ok((apply_result, finalized))
             }
             HashType::Receipt => Err(anyhow!(
                 "{} appears to be a Receipt ID, not a tx hash. Try running:\nview_state apply_receipt --hash {}",
@@ -289,7 +290,7 @@ fn apply_tx_in_chunk(
     chain_store: &mut ChainStore,
     tx_hash: &CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<Vec<ApplyChunkResult>> {
+) -> anyhow::Result<Vec<(ApplyChunkResult, ApplyChunkResultFinalized)>> {
     if chain_store.get_transaction(tx_hash)?.is_none() {
         return Err(anyhow!("tx with hash {} not known", tx_hash));
     }
@@ -339,8 +340,9 @@ fn apply_tx_in_chunk(
         );
         let (apply_result, gas_limit) =
             apply_chunk(epoch_manager, runtime, chain_store, &chunk_hash, None, None, storage)?;
-        println!("resulting chunk extra:\n{:?}", resulting_chunk_extra(&apply_result, gas_limit));
-        results.push(apply_result);
+        let (chunk_extra, finalized) = resulting_chunk_extra(&apply_result, gas_limit);
+        println!("resulting chunk extra:\n{:?}", chunk_extra);
+        results.push((apply_result, finalized));
     }
     Ok(results)
 }
@@ -352,7 +354,7 @@ pub fn apply_tx(
     store: Store,
     tx_hash: CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<Vec<ApplyChunkResult>> {
+) -> anyhow::Result<Vec<(ApplyChunkResult, ApplyChunkResultFinalized)>> {
     let mut chain_store =
         ChainStore::new(store.clone(), false, genesis_config.transaction_validity_period);
     let outcomes = chain_store.get_outcomes_by_id(&tx_hash)?;
@@ -378,7 +380,7 @@ fn apply_receipt_in_block(
     id: &CryptoHash,
     block_hash: CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<ApplyChunkResult> {
+) -> anyhow::Result<(ApplyChunkResult, ApplyChunkResultFinalized)> {
     match find_tx_or_receipt(id, &block_hash, epoch_manager, chain_store)? {
         Some((hash_type, shard_id)) => match hash_type {
             HashType::Tx => Err(anyhow!(
@@ -402,14 +404,14 @@ fn apply_receipt_in_block(
                     chain_store,
                     storage,
                 );
-                check_apply_block_result(
+                let finalized = check_apply_block_result(
                     &block,
                     &apply_result,
                     epoch_manager,
                     chain_store,
                     shard_id,
                 )?;
-                Ok(apply_result)
+                Ok((apply_result, finalized))
             }
         },
         None => {
@@ -430,7 +432,7 @@ fn apply_receipt_in_chunk(
     chain_store: &mut ChainStore,
     id: &CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<Vec<ApplyChunkResult>> {
+) -> anyhow::Result<Vec<(ApplyChunkResult, ApplyChunkResultFinalized)>> {
     println!("Receipt is not indexed; searching in chunks that haven't been applied...");
 
     let head = chain_store.head()?.height;
@@ -494,9 +496,9 @@ fn apply_receipt_in_chunk(
         );
         let (apply_result, gas_limit) =
             apply_chunk(epoch_manager, runtime, chain_store, chunk_hash, None, None, storage)?;
-        let chunk_extra = resulting_chunk_extra(&apply_result, gas_limit);
+        let (chunk_extra, finalized) = resulting_chunk_extra(&apply_result, gas_limit);
         println!("resulting chunk extra:\n{:?}", chunk_extra);
-        results.push(apply_result);
+        results.push((apply_result, finalized));
     }
     Ok(results)
 }
@@ -508,7 +510,7 @@ pub fn apply_receipt(
     store: Store,
     id: CryptoHash,
     storage: StorageSource,
-) -> anyhow::Result<Vec<ApplyChunkResult>> {
+) -> anyhow::Result<Vec<(ApplyChunkResult, ApplyChunkResultFinalized)>> {
     let mut chain_store =
         ChainStore::new(store.clone(), false, genesis_config.transaction_validity_period);
     let outcomes = chain_store.get_outcomes_by_id(&id)?;

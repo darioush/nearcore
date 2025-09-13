@@ -39,7 +39,7 @@ use near_store::db::metadata::DbKind;
 use near_store::flat::FlatStorageManager;
 use near_store::{
     ApplyStatePartResult, COLD_HEAD_KEY, DBCol, ShardTries, StateSnapshotConfig, Store, Trie,
-    TrieConfig, TrieUpdate, WrappedTrieChanges,
+    TrieConfig, TrieUpdate,
 };
 use near_vm_runner::ContractCode;
 use near_vm_runner::{ContractRuntimeCache, precompile_contract};
@@ -283,7 +283,6 @@ impl NightshadeRuntime {
                 RuntimeError::ReceiptValidationError(e) => panic!("{}", e),
                 RuntimeError::ValidatorError(e) => e.into(),
             })?;
-        let (apply_result, finalized) = apply_result.finalize();
         let elapsed = instant.elapsed();
 
         let total_gas_burnt = apply_result
@@ -314,27 +313,21 @@ impl NightshadeRuntime {
         let shard_uid = self.get_shard_uid_from_prev_hash(shard_id, prev_block_hash)?;
 
         let result = ApplyChunkResult {
-            trie_changes: WrappedTrieChanges::new(
-                self.get_tries(),
-                shard_uid,
-                finalized.trie_changes,
-                finalized.state_changes,
-                apply_state.block_height,
-            ),
-            new_root: finalized.state_root,
+            shard_uid,
+            block_height,
+            tries: self.get_tries(),
+            state_update: apply_result.state_update,
             outcomes: apply_result.outcomes,
             outgoing_receipts: apply_result.outgoing_receipts,
             validator_proposals: apply_result.validator_proposals,
             total_gas_burnt,
             total_balance_burnt,
-            proof: finalized.proof,
             processed_delayed_receipts: apply_result.processed_delayed_receipts,
             processed_yield_timeouts: apply_result.processed_yield_timeouts,
             applied_receipts_hash: hash(&borsh::to_vec(receipts).unwrap()),
             congestion_info: apply_result.congestion_info,
             bandwidth_requests: apply_result.bandwidth_requests,
             bandwidth_scheduler_state_hash: apply_result.bandwidth_scheduler_state_hash,
-            contract_updates: finalized.contract_updates,
             stats: apply_result.stats,
         };
 

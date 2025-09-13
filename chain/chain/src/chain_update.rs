@@ -136,10 +136,11 @@ impl<'a> ChainUpdate<'a> {
                 let (outcome_root, outcome_paths) =
                     ApplyChunkResult::compute_outcomes_proof(&apply_result.outcomes);
                 let shard_id = shard_uid.shard_id();
+                let finalized = apply_result.finalize();
 
                 // Save state root after applying transactions.
                 let chunk_extra = ChunkExtra::new(
-                    &apply_result.new_root,
+                    &finalized.new_root,
                     outcome_root,
                     apply_result.validator_proposals,
                     apply_result.total_gas_burnt,
@@ -160,11 +161,11 @@ impl<'a> ChainUpdate<'a> {
                     *prev_hash,
                     height,
                     shard_uid,
-                    apply_result.trie_changes.state_changes(),
+                    finalized.trie_changes.state_changes(),
                 )?;
                 self.chain_store_update.merge(store_update.into());
 
-                self.chain_store_update.save_trie_changes(*block_hash, apply_result.trie_changes);
+                self.chain_store_update.save_trie_changes(*block_hash, finalized.trie_changes);
                 self.chain_store_update.save_outgoing_receipt(
                     block_hash,
                     shard_id,
@@ -181,9 +182,9 @@ impl<'a> ChainUpdate<'a> {
                     self.chain_store_update.save_state_transition_data(
                         *block_hash,
                         shard_id,
-                        apply_result.proof,
+                        finalized.proof,
                         apply_result.applied_receipts_hash,
-                        apply_result.contract_updates,
+                        finalized.contract_updates,
                     );
                 }
                 self.chain_store_update.save_chunk_apply_stats(
@@ -198,7 +199,8 @@ impl<'a> ChainUpdate<'a> {
                 // extra and apply changes to it.
                 let old_extra = self.chain_store_update.get_chunk_extra(prev_hash, &shard_uid)?;
                 let mut new_extra = ChunkExtra::clone(&old_extra);
-                *new_extra.state_root_mut() = apply_result.new_root;
+                let finalized = apply_result.finalize();
+                *new_extra.state_root_mut() = finalized.new_root;
 
                 let flat_storage_manager = self.runtime_adapter.get_flat_storage_manager();
                 let store_update = flat_storage_manager.save_flat_state_changes(
@@ -206,19 +208,19 @@ impl<'a> ChainUpdate<'a> {
                     *prev_hash,
                     height,
                     shard_uid,
-                    apply_result.trie_changes.state_changes(),
+                    finalized.trie_changes.state_changes(),
                 )?;
                 self.chain_store_update.merge(store_update.into());
 
                 self.chain_store_update.save_chunk_extra(block_hash, &shard_uid, new_extra.into());
-                self.chain_store_update.save_trie_changes(*block_hash, apply_result.trie_changes);
+                self.chain_store_update.save_trie_changes(*block_hash, finalized.trie_changes);
                 if should_save_state_transition_data {
                     self.chain_store_update.save_state_transition_data(
                         *block_hash,
                         shard_uid.shard_id(),
-                        apply_result.proof,
+                        finalized.proof,
                         apply_result.applied_receipts_hash,
-                        apply_result.contract_updates,
+                        finalized.contract_updates,
                     );
                 }
                 self.chain_store_update.save_chunk_apply_stats(
@@ -537,6 +539,7 @@ impl<'a> ChainUpdate<'a> {
             &receipts,
             transactions,
         )?;
+        let finalized = apply_result.finalize();
 
         let (outcome_root, outcome_proofs) =
             ApplyChunkResult::compute_outcomes_proof(&apply_result.outcomes);
@@ -551,14 +554,14 @@ impl<'a> ChainUpdate<'a> {
             *chunk_header.prev_block_hash(),
             chunk_header.height_included(),
             shard_uid,
-            apply_result.trie_changes.state_changes(),
+            finalized.trie_changes.state_changes(),
         )?;
         self.chain_store_update.merge(store_update.into());
 
-        self.chain_store_update.save_trie_changes(*block_header.hash(), apply_result.trie_changes);
+        self.chain_store_update.save_trie_changes(*block_header.hash(), finalized.trie_changes);
 
         let chunk_extra = ChunkExtra::new(
-            &apply_result.new_root,
+            &finalized.new_root,
             outcome_root,
             apply_result.validator_proposals,
             apply_result.total_gas_burnt,
@@ -651,22 +654,23 @@ impl<'a> ChainUpdate<'a> {
             &[],
             SignedValidPeriodTransactions::empty(),
         )?;
+        let finalized = apply_result.finalize();
         let flat_storage_manager = self.runtime_adapter.get_flat_storage_manager();
         let store_update = flat_storage_manager.save_flat_state_changes(
             *block_header.hash(),
             *prev_block_header.hash(),
             height,
             shard_uid,
-            apply_result.trie_changes.state_changes(),
+            finalized.trie_changes.state_changes(),
         )?;
         self.chain_store_update.merge(store_update.into());
-        self.chain_store_update.save_trie_changes(*block_header.hash(), apply_result.trie_changes);
+        self.chain_store_update.save_trie_changes(*block_header.hash(), finalized.trie_changes);
 
         // The chunk is missing but some fields may need to be updated
         // anyway. Prepare a chunk extra as a copy of the old chunk
         // extra and apply changes to it.
         let mut new_chunk_extra = ChunkExtra::clone(&chunk_extra);
-        *new_chunk_extra.state_root_mut() = apply_result.new_root;
+        *new_chunk_extra.state_root_mut() = finalized.new_root;
         self.chain_store_update.save_chunk_extra(
             block_header.hash(),
             &shard_uid,

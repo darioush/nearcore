@@ -119,7 +119,8 @@ fn test_apply_chunk() {
                     StorageSource::Trie,
                 )
                 .unwrap();
-                assert_eq!(apply_result.new_root, new_root);
+                let finalized = apply_result.finalize();
+                assert_eq!(finalized.new_root, new_root);
             }
         }
     }
@@ -208,7 +209,7 @@ fn test_apply_tx_apply_receipt() {
                     )
                     .unwrap();
                     assert_eq!(results.len(), 1);
-                    assert_eq!(results[0].new_root, new_roots[shard_index]);
+                    assert_eq!(results[0].1.new_root, new_roots[shard_index]);
                 }
 
                 for receipt in chunk.prev_outgoing_receipts() {
@@ -225,7 +226,7 @@ fn test_apply_tx_apply_receipt() {
                     )
                     .unwrap();
                     assert_eq!(results.len(), 1);
-                    assert_eq!(results[0].new_root, new_roots[to_shard_index]);
+                    assert_eq!(results[0].1.new_root, new_roots[to_shard_index]);
                 }
             }
         }
@@ -256,7 +257,7 @@ fn test_apply_tx_apply_receipt() {
             .unwrap();
             for result in results {
                 let mut applied = false;
-                for outcome in result.outcomes {
+                for outcome in result.0.outcomes {
                     if outcome.id == tx.get_hash() {
                         applied = true;
                         break;
@@ -275,7 +276,7 @@ fn test_apply_tx_apply_receipt() {
                 StorageSource::Trie,
             )
             .unwrap();
-            for result in results {
+            for (result, _finalized) in results {
                 let mut applied = false;
                 for outcome in result.outcomes {
                     if outcome.id == receipt.get_hash() {

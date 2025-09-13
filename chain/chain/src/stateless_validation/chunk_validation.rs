@@ -658,8 +658,9 @@ pub fn validate_chunk_state_witness_impl(
                     shard_context,
                     runtime_adapter,
                 )?;
+                let finalized = apply_result.finalize();
                 let congestion_info = chunk_extra.congestion_info();
-                (shard_uid, apply_result.new_root, congestion_info)
+                (shard_uid, finalized.new_root, congestion_info)
             }
             ImplicitTransitionParams::Resharding(
                 boundary_account,
@@ -800,8 +801,9 @@ pub fn apply_result_to_chunk_extra(
     chunk: &ShardChunkHeader,
 ) -> ChunkExtra {
     let (outcome_root, _) = ApplyChunkResult::compute_outcomes_proof(&apply_result.outcomes);
+    let finalized = apply_result.finalize();
     ChunkExtra::new(
-        &apply_result.new_root,
+        &finalized.new_root,
         outcome_root,
         apply_result.validator_proposals,
         apply_result.total_gas_burnt,

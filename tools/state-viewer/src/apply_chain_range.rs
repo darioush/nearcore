@@ -254,7 +254,8 @@ fn get_chunk_application_input(
                     }
                     ApplicationInputOrSkip::Input(input) => {
                         let o = apply_chunk_from_input(input, runtime_adapter);
-                        let storage_proof = o.proof.unwrap();
+                        let o_finalized = o.finalize();
+                        let storage_proof = o_finalized.proof.unwrap();
                         RuntimeStorageConfig {
                             state_root: *chunk_inner.prev_state_root(),
                             use_flat_storage: false,
@@ -433,11 +434,12 @@ fn apply_block_from_range(
 
     // Apply the chunk (consumes input)
     let apply_result = apply_chunk_from_input(input, &*runtime_adapter);
+    let finalized = apply_result.finalize();
 
     // Process application outcome
     let (outcome_root, _) = ApplyChunkResult::compute_outcomes_proof(&apply_result.outcomes);
     let chunk_extra = ChunkExtra::new(
-        &apply_result.new_root,
+        &finalized.new_root,
         outcome_root,
         apply_result.validator_proposals.clone(),
         apply_result.total_gas_burnt,
@@ -498,7 +500,7 @@ fn apply_block_from_range(
             chunk_present,
             apply_result.processed_delayed_receipts.len(),
             delayed_indices.unwrap_or(None).map_or(0, |d| d.next_available_index - d.first_index),
-            apply_result.trie_changes.state_changes().len(),
+            finalized.trie_changes.state_changes().len(),
         ),
     );
     progress_reporter.inc_and_report_progress(height, apply_result.total_gas_burnt);
@@ -515,7 +517,7 @@ fn apply_block_from_range(
         (_, StorageSource::FlatStorage | StorageSource::Memtrie) => {
             // Compute delta and immediately apply to flat storage.
             let changes =
-                FlatStateChanges::from_state_changes(apply_result.trie_changes.state_changes());
+                FlatStateChanges::from_state_changes(finalized.trie_changes.state_changes());
             let delta = near_store::flat::FlatStateDelta {
                 metadata: near_store::flat::FlatStateDeltaMetadata {
                     block: BlockInfo { hash: block_hash, height, prev_hash: prev_block_hash },
@@ -540,14 +542,14 @@ fn apply_block_from_range(
             let mut store_update = read_store.store_update();
             let state_transition_data =
                 StoredChunkStateTransitionData::V1(StoredChunkStateTransitionDataV1 {
-                    base_state: apply_result.proof.unwrap().nodes,
+                    base_state: finalized.proof.unwrap().nodes,
                     receipts_hash: apply_result.applied_receipts_hash,
-                    contract_accesses: apply_result
+                    contract_accesses: finalized
                         .contract_updates
                         .contract_accesses
                         .into_iter()
                         .collect(),
-                    contract_deploys: apply_result
+                    contract_deploys: finalized
                         .contract_updates
                         .contract_deploys
                         .into_iter()
@@ -566,8 +568,8 @@ fn apply_block_from_range(
         (_, StorageSource::FlatStorage) => {
             // Apply trie changes to trie node caches.
             let mut fake_store_update = read_store.trie_store().store_update();
-            apply_result.trie_changes.insertions_into(&mut fake_store_update);
-            apply_result.trie_changes.deletions_into(&mut fake_store_update);
+            finalized.trie_changes.insertions_into(&mut fake_store_update);
+            finalized.trie_changes.deletions_into(&mut fake_store_update);
         }
         (_, StorageSource::Trie | StorageSource::TrieFree | StorageSource::Memtrie) => {
             if let Err(err) = maybe_save_trie_changes(
