@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 mod iterator;
 
 /// Key-value update. Contains a TrieKey and a value.
+#[derive(Clone)]
 pub struct TrieKeyValueUpdate {
     pub trie_key: TrieKey,
     pub value: Option<Vec<u8>>,
@@ -35,6 +36,17 @@ pub struct TrieUpdate {
     contract_storage: ContractStorage,
     committed: RawStateChanges,
     prospective: TrieUpdates,
+}
+
+impl Clone for TrieUpdate {
+    fn clone(&self) -> Self {
+        Self {
+            trie: self.trie.recording_reads_new_recorder(),
+            contract_storage: ContractStorage::new(self.trie.storage.clone()),
+            committed: self.committed.clone(),
+            prospective: self.prospective.clone(),
+        }
+    }
 }
 
 static_assertions::assert_impl_all!(TrieUpdate: Send, Sync);

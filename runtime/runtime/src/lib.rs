@@ -201,6 +201,10 @@ impl StateUpdateHolder {
     pub fn take(&self) -> Option<TrieUpdate> {
         self.0.lock().take()
     }
+
+    pub fn clone_inner(&self) -> Option<TrieUpdate> {
+        self.0.lock().as_ref().cloned()
+    }
 }
 
 #[derive(Debug)]

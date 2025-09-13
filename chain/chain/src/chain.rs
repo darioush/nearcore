@@ -3220,12 +3220,25 @@ impl Chain {
             shard_id,
             cached_shard_update_key,
             Box::new(move |parent_span| -> Result<ShardUpdateResult, Error> {
-                Ok(process_shard_update(
+                let result = process_shard_update(
                     parent_span,
                     runtime.as_ref(),
                     shard_update_reason,
                     shard_context,
-                )?)
+                )?;
+                match result {
+                    ShardUpdateResult::NewChunk(result) => {
+                        // XXX: These refactorings defer calculating state_root to postprocessing.
+                        // Here, the control has returned to chain, where it's easier to send a message to client.
+                        let _state_update = result
+                            .apply_result
+                            .state_update
+                            .clone_inner()
+                            .expect("state_update should still be there");
+                        Ok(ShardUpdateResult::NewChunk(result))
+                    }
+                    ShardUpdateResult::OldChunk(_) => Ok(result),
+                }
             }),
         )))
     }
