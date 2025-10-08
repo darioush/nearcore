@@ -496,8 +496,19 @@ def main():
         logger.error(f"Error reading binary_url from {bm_params_path}: {e}")
         sys.exit(1)
 
-    forknet_details = fetch_forknet_details(unique_id, bm_params)
+    tracing_server_ip = os.environ.get('TRACING_SERVER_IP', None)
+    if tracing_server_ip is not None:
+        forknet_details = {
+            "cp_instance_names": [],
+            "tracing_server_internal_ip": None,
+            "tracing_server_external_ip": tracing_server_ip
+        }
+        logger.info(
+            f"Using tracing server IP from env: {tracing_server_ip}")
+    else:
+        forknet_details = fetch_forknet_details(unique_id, bm_params)
     logger.info(forknet_details)
+
 
     parser = ArgumentParser(
         description='Forknet cluster parameters to launch a sharded benchmark')
