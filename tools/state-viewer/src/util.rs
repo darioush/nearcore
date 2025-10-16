@@ -37,6 +37,16 @@ pub fn load_trie_stop_at_height(
     near_config: &NearConfig,
     mode: LoadTrieMode,
 ) -> (Arc<EpochManagerHandle>, Arc<NightshadeRuntime>, Vec<StateRoot>, BlockHeader) {
+    load_trie_stop_at_height_maybe_shard_uid(store, home_dir, near_config, mode, None)
+}
+
+pub fn load_trie_stop_at_height_maybe_shard_uid(
+    store: Store,
+    home_dir: &Path,
+    near_config: &NearConfig,
+    mode: LoadTrieMode,
+    maybe_shard_uid: Option<ShardUId>,
+) -> (Arc<EpochManagerHandle>, Arc<NightshadeRuntime>, Vec<StateRoot>, BlockHeader) {
     let chain_store = ChainStore::new(
         store.clone(),
         near_config.client_config.save_trie_changes,
@@ -64,6 +74,11 @@ pub fn load_trie_stop_at_height(
     let mut state_roots = vec![];
     for chunk in block.chunks().iter() {
         let shard_uid = ShardUId::from_shard_id_and_layout(chunk.shard_id(), &shard_layout);
+        if let Some(s) = maybe_shard_uid {
+            if s != shard_uid {
+                continue;
+            }
+        }
         let chunk_extra = chain_store.get_chunk_extra(&head.last_block_hash, &shard_uid).unwrap();
         let state_root = *chunk_extra.state_root();
         state_roots.push(state_root);

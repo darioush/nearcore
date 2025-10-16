@@ -9,7 +9,7 @@ use crate::state_dump::state_dump_redis;
 use crate::tx_dump::dump_tx_from_block;
 use crate::util::{
     LoadTrieMode, check_apply_block_result, load_trie, load_trie_stop_at_height,
-    resulting_chunk_extra,
+    load_trie_stop_at_height_maybe_shard_uid, resulting_chunk_extra,
 };
 use crate::{apply_chunk, epoch_info};
 use anyhow::Context;
@@ -1306,8 +1306,13 @@ pub(crate) fn print_state_stats(
     split_parts: usize,
     shard_uid: Option<ShardUId>,
 ) {
-    let (epoch_manager, runtime, _, block_header) =
-        load_trie(store.clone(), home_dir, &near_config);
+    let (epoch_manager, runtime, _, block_header) = load_trie_stop_at_height_maybe_shard_uid(
+        store.clone(),
+        home_dir,
+        &near_config,
+        LoadTrieMode::Latest,
+        shard_uid,
+    );
 
     let block_hash = *block_header.hash();
     let shard_layout = epoch_manager.get_shard_layout_from_prev_block(&block_hash).unwrap();
