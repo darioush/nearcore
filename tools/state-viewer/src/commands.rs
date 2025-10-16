@@ -41,7 +41,9 @@ use near_primitives::state_record::StateRecord;
 use near_primitives::state_record::state_record_to_account_id;
 use near_primitives::stateless_validation::ChunkProductionKey;
 use near_primitives::trie_key::TrieKey;
-use near_primitives::trie_key::col::COLUMNS_WITH_ACCOUNT_ID_IN_KEY;
+use near_primitives::trie_key::col::{
+    COLUMNS_WITH_ACCOUNT_ID_IN_KEY, COLUMNS_WITHOUT_ACCOUNT_ID_IN_KEY,
+};
 use near_primitives::types::{BlockHeight, EpochId, ShardId};
 use near_primitives::version::PROTOCOL_VERSION;
 use near_primitives_core::types::{Balance, EpochHeight};
@@ -1390,22 +1392,23 @@ fn print_state_stats_for_shard_uid(
         state_stats.push(state_stats_account);
     }
 
+    let _split_parts = split_parts;
     // iterate for the second time to find the split accounts
-    let group_by = get_state_stats_group_by(&chunk_view, &trie_storage);
-    let total_size = state_stats.total_size.as_u64();
-    let mut current_size = ByteSize::default();
-    let mut current_threshold: usize = 1;
-    for state_stats_account in get_state_stats_account_iter(&group_by) {
-        let new_size = current_size + state_stats_account.size;
-        if new_size.as_u64() * split_parts as u64 > total_size * current_threshold as u64 {
-            state_stats.split_accounts.push((state_stats_account, current_size));
-            current_threshold += 1;
-            if current_threshold == split_parts {
-                break;
-            }
-        }
-        current_size = new_size;
-    }
+    // let group_by = get_state_stats_group_by(&chunk_view, &trie_storage);
+    // let total_size = state_stats.total_size.as_u64();
+    // let mut current_size = ByteSize::default();
+    // let mut current_threshold: usize = 1;
+    // for state_stats_account in get_state_stats_account_iter(&group_by) {
+    //     let new_size = current_size + state_stats_account.size;
+    //     if new_size.as_u64() * split_parts as u64 > total_size * current_threshold as u64 {
+    //         state_stats.split_accounts.push((state_stats_account, current_size));
+    //         current_threshold += 1;
+    //         if current_threshold == split_parts {
+    //             break;
+    //         }
+    //     }
+    //     current_size = new_size;
+    // }
 
     tracing::info!(target: "state_viewer", "{shard_uid:?}");
     tracing::info!(target: "state_viewer", "{state_stats:#?}");
@@ -1418,9 +1421,9 @@ fn get_state_stats_group_by<'a>(
     chunk_view: &'a FlatStorageChunkView,
     trie_storage: &'a TrieDBStorage,
 ) -> ChunkBy<
-    AccountId,
+    Option<AccountId>,
     impl Iterator<Item = StateStatsStateRecord> + 'a,
-    impl FnMut(&StateStatsStateRecord) -> AccountId,
+    impl FnMut(&StateStatsStateRecord) -> Option<AccountId>,
 > {
     // The flat state iterator is sorted by type, account id. In order to
     // rearrange it we get the iterators for each type and later merge them by
@@ -1430,8 +1433,16 @@ fn get_state_stats_group_by<'a>(
         .map(|(type_byte, _)| chunk_view.iter_range(Some(&[*type_byte]), Some(&[*type_byte + 1])))
         .into_iter();
 
+    let no_account_type_iters = COLUMNS_WITHOUT_ACCOUNT_ID_IN_KEY
+        .iter()
+        .map(|(type_byte, _)| chunk_view.iter_range(Some(&[*type_byte]), Some(&[*type_byte + 1])))
+        .into_iter();
+
     // Filter out any errors.
-    let type_iters = type_iters.map(|type_iter| type_iter.filter_map(|item| item.ok())).into_iter();
+    let type_iters = type_iters
+        .chain(no_account_type_iters)
+        .map(|type_iter| type_iter.filter_map(|item| item.ok()))
+        .into_iter();
 
     // Read the values from and convert items to StateStatsStateRecord.
     let type_iters = type_iters
@@ -1440,12 +1451,14 @@ fn get_state_stats_group_by<'a>(
                 let value = read_flat_state_value(&trie_storage, value);
                 let key_size = key.len() as u64;
                 let value_size = value.len() as u64;
-                let size = ByteSize::b(key_size + value_size);
                 let state_record = StateRecord::from_raw_key_value(&key, value);
+                let maybe_account_id =
+                    state_record.as_ref().map(state_record_to_account_id).cloned();
                 state_record.map(|state_record| StateStatsStateRecord {
-                    account_id: state_record_to_account_id(&state_record).clone(),
-                    state_record,
-                    size,
+                    account_id: maybe_account_id,
+                    state_record: Some(state_record),
+                    key_size: ByteSize::b(key_size),
+                    value_size: ByteSize::b(value_size),
                 })
             })
         })
@@ -1464,9 +1477,9 @@ fn get_state_stats_group_by<'a>(
 /// iterator of StateStatsAccount.
 fn get_state_stats_account_iter<'a>(
     group_by: &'a ChunkBy<
-        AccountId,
+        Option<AccountId>,
         impl Iterator<Item = StateStatsStateRecord> + 'a,
-        impl FnMut(&StateStatsStateRecord) -> AccountId,
+        impl FnMut(&StateStatsStateRecord) -> Option<AccountId>,
     >,
 ) -> impl Iterator<Item = StateStatsAccount> + 'a {
     // aggregate size for each account id group
@@ -1474,10 +1487,12 @@ fn get_state_stats_account_iter<'a>(
         .into_iter()
         .map(|(account_id, group)| {
             let mut size = ByteSize::b(0);
+            let mut count = 0;
             for state_stats_state_record in group {
-                size += state_stats_state_record.size;
+                size += state_stats_state_record.key_size + state_stats_state_record.value_size;
+                count += 1;
             }
-            StateStatsAccount { account_id, size }
+            StateStatsAccount { account_id, size, count }
         })
         .into_iter()
 }
@@ -1499,12 +1514,14 @@ fn read_flat_state_value(
 pub struct StateStats {
     pub total_size: ByteSize,
     pub total_count: usize,
+    pub total_keys: usize,
 
     // Accounts that split the state into N most possibly even parts (storage-wise).
     // Every account is accompanied by the total size of all accounts before it.
     pub split_accounts: Vec<(StateStatsAccount, ByteSize)>,
 
     pub top_accounts: BinaryHeap<StateStatsAccount>,
+    pub no_account: Option<StateStatsAccount>,
 }
 
 impl core::fmt::Debug for StateStats {
@@ -1532,7 +1549,7 @@ impl core::fmt::Debug for StateStats {
             let right_percent = 100 * right_size.as_u64() / total_size;
 
             SplitAccount {
-                account_id: &acc.account_id,
+                account_id: acc.account_id.as_ref().unwrap(),
                 split: format!("{left_size:?} ({left_percent}%) : {middle_size:?} ({middle_percent}%) : {right_size:?} ({right_percent}%)"),
             }
         }).collect_vec();
@@ -1543,6 +1560,7 @@ impl core::fmt::Debug for StateStats {
             .field("average_size", &average_size)
             .field("split_accounts", &split_accounts)
             .field("top_accounts", &self.top_accounts)
+            .field("no_account", &self.no_account)
             .finish()
     }
 }
@@ -1550,11 +1568,16 @@ impl core::fmt::Debug for StateStats {
 impl StateStats {
     pub fn push(&mut self, state_stats_account: StateStatsAccount) {
         self.total_size += state_stats_account.size;
+        self.total_keys += state_stats_account.count;
         self.total_count += 1;
 
-        self.top_accounts.push(state_stats_account);
-        if self.top_accounts.len() > 5 {
-            self.top_accounts.pop();
+        if state_stats_account.account_id.is_none() {
+            self.no_account = Some(state_stats_account);
+        } else {
+            self.top_accounts.push(state_stats_account);
+            if self.top_accounts.len() > 5 {
+                self.top_accounts.pop();
+            }
         }
     }
 }
@@ -1563,9 +1586,10 @@ impl StateStats {
 /// It's used as a helper struct for merging state records from different record types.
 #[derive(Eq, PartialEq)]
 struct StateStatsStateRecord {
-    state_record: StateRecord,
-    account_id: AccountId,
-    size: ByteSize,
+    state_record: Option<StateRecord>,
+    account_id: Option<AccountId>,
+    key_size: ByteSize,
+    value_size: ByteSize,
 }
 
 impl Ord for StateStatsStateRecord {
@@ -1584,8 +1608,9 @@ impl PartialOrd for StateStatsStateRecord {
 /// It is the result of the grouping of state records belonging to the same account.
 #[derive(PartialEq, Eq)]
 pub struct StateStatsAccount {
-    pub account_id: AccountId,
+    pub account_id: Option<AccountId>,
     pub size: ByteSize,
+    pub count: usize,
 }
 
 impl Ord for StateStatsAccount {
@@ -1603,7 +1628,7 @@ impl PartialOrd for StateStatsAccount {
 impl std::fmt::Debug for StateStatsAccount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateStatsAccount")
-            .field("account_id", &self.account_id.as_str())
+            .field("account_id", &self.account_id.as_ref().map_or("no account", |id| id.as_str()))
             .field("size", &self.size)
             .finish()
     }

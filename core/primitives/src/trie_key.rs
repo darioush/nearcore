@@ -84,6 +84,17 @@ pub mod col {
         (GAS_KEY, "GasKey"),
     ];
 
+    pub const COLUMNS_WITHOUT_ACCOUNT_ID_IN_KEY: [(u8, &str); 8] = [
+        (DELAYED_RECEIPT_OR_INDICES, "DelayedReceiptOrIndices"),
+        (PROMISE_YIELD_INDICES, "PromiseYieldIndices"),
+        (PROMISE_YIELD_TIMEOUT, "PromiseYieldTimeout"),
+        (BUFFERED_RECEIPT_INDICES, "BufferedReceiptIndices"),
+        (BUFFERED_RECEIPT, "BufferedReceipt"),
+        (BANDWIDTH_SCHEDULER_STATE, "BandwidthSchedulerState"),
+        (BUFFERED_RECEIPT_GROUPS_QUEUE_DATA, "BufferedReceiptGroupsQueueData"),
+        (BUFFERED_RECEIPT_GROUPS_QUEUE_ITEM, "BufferedReceiptGroupsQueueItem"),
+    ];
+
     pub const ALL_COLUMNS_WITH_NAMES: [(u8, &'static str); 19] = [
         (ACCOUNT, "Account"),
         (CONTRACT_CODE, "ContractCode"),
