@@ -1452,11 +1452,10 @@ fn get_state_stats_group_by<'a>(
                 let key_size = key.len() as u64;
                 let value_size = value.len() as u64;
                 let state_record = StateRecord::from_raw_key_value(&key, value);
-                let maybe_account_id =
-                    state_record.as_ref().map(state_record_to_account_id).cloned();
-                state_record.map(|state_record| StateStatsStateRecord {
-                    account_id: maybe_account_id,
-                    state_record: Some(state_record),
+                let account_id = state_record.as_ref().map(state_record_to_account_id).cloned();
+                Some(StateStatsStateRecord {
+                    account_id,
+                    state_record,
                     key_size: ByteSize::b(key_size),
                     value_size: ByteSize::b(value_size),
                 })
@@ -1557,6 +1556,7 @@ impl core::fmt::Debug for StateStats {
         f.debug_struct("StateStats")
             .field("total_size", &self.total_size)
             .field("total_count", &self.total_count)
+            .field("total_keys", &self.total_keys)
             .field("average_size", &average_size)
             .field("split_accounts", &split_accounts)
             .field("top_accounts", &self.top_accounts)
