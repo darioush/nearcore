@@ -1629,6 +1629,7 @@ impl std::fmt::Debug for StateStatsAccount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateStatsAccount")
             .field("account_id", &self.account_id.as_ref().map_or("no account", |id| id.as_str()))
+            .field("count", &self.count)
             .field("size", &self.size)
             .finish()
     }
