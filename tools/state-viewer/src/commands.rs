@@ -69,13 +69,14 @@ use std::sync::Arc;
 use yansi::Color::Red;
 
 /// Bucket definitions for key size distribution (in bytes)
-const KEY_BUCKETS: &[u64] = &[10, 50, 100, 500, 1_000, 5_000, u64::MAX];
-const KEY_BUCKET_LABELS: &[&str] =
-    &["0-10", "11-50", "51-100", "101-500", "501-1K", "1K-5K", "5K+"];
+const KEY_BUCKETS: &[u64] = &[32, 64, 128, 256, 512, u64::MAX];
+const KEY_BUCKET_LABELS: &[&str] = &["0-32", "33-64", "65-128", "129-256", "257-512", "513+"];
 
 /// Bucket definitions for value size distribution (in bytes)
-const VALUE_BUCKETS: &[u64] = &[100, 1_000, 10_000, 100_000, 1_000_000, u64::MAX];
-const VALUE_BUCKET_LABELS: &[&str] = &["0-100", "101-1K", "1K-10K", "10K-100K", "100K-1M", "1M+"];
+const K: u64 = 1024;
+const VALUE_BUCKETS: &[u64] = &[128, 256, 512, 1024, 10 * K, 100 * K, 1024 * K, u64::MAX];
+const VALUE_BUCKET_LABELS: &[&str] =
+    &["0-128", "129-256", "257-512", "513-1K", "1K-10K", "10K-100K", "100K-1M", "1M+"];
 
 /// Statistics for size distribution in buckets
 #[derive(Debug, Default)]
