@@ -58,6 +58,7 @@ use nearcore::NightshadeRuntimeExt;
 use nearcore::{NearConfig, NightshadeRuntime};
 use node_runtime::SignedValidPeriodTransactions;
 use node_runtime::adapter::ViewRuntimeAdapter;
+use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -1385,9 +1386,20 @@ fn print_state_stats_for_shard_uid(
 
     let mut state_stats = StateStats::default();
 
+    let ks = Arc::new(RwLock::new(0u64));
+    let vs = Arc::new(RwLock::new(0u64));
+    let cb = {
+        let ks = ks.clone();
+        let vs = vs.clone();
+        Box::new(move |k: ByteSize, v: ByteSize| {
+            *ks.write() += k.as_u64();
+            *vs.write() += v.as_u64();
+        })
+    };
+
     // iterate for the first time to get the size statistics
     let group_by = get_state_stats_group_by(&chunk_view, &trie_storage);
-    let iter = get_state_stats_account_iter(&group_by);
+    let iter = get_state_stats_account_iter(&group_by, Some(cb));
     for state_stats_account in iter {
         state_stats.push(state_stats_account);
     }
@@ -1410,6 +1422,7 @@ fn print_state_stats_for_shard_uid(
     //     current_size = new_size;
     // }
 
+    tracing::info!(target: "state_viewer", ks=*ks.read(), vs=*vs.read(), "kvs");
     tracing::info!(target: "state_viewer", "{shard_uid:?}");
     tracing::info!(target: "state_viewer", "{state_stats:#?}");
 }
@@ -1480,16 +1493,23 @@ fn get_state_stats_account_iter<'a>(
         impl Iterator<Item = StateStatsStateRecord> + 'a,
         impl FnMut(&StateStatsStateRecord) -> Option<AccountId>,
     >,
+    mut kv_size_callback: Option<Box<dyn FnMut(ByteSize, ByteSize)>>,
 ) -> impl Iterator<Item = StateStatsAccount> + 'a {
     // aggregate size for each account id group
     group_by
         .into_iter()
-        .map(|(account_id, group)| {
+        .map(move |(account_id, group)| {
             let mut size = ByteSize::b(0);
             let mut count = 0;
             for state_stats_state_record in group {
                 size += state_stats_state_record.key_size + state_stats_state_record.value_size;
                 count += 1;
+                if let Some(callback) = kv_size_callback.as_mut() {
+                    callback.as_mut()(
+                        state_stats_state_record.key_size,
+                        state_stats_state_record.value_size,
+                    );
+                }
             }
             StateStatsAccount { account_id, size, count }
         })
