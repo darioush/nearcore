@@ -1426,6 +1426,12 @@ pub(crate) fn print_state_stats(
 
     let block_hash = *block_header.hash();
     let shard_layout = epoch_manager.get_shard_layout_from_prev_block(&block_hash).unwrap();
+    tracing::info!(
+        target: "state_viewer",
+        "Printing state stats for block {:?} at height {}",
+        block_hash,
+        block_header.height()
+    );
 
     let flat_storage_manager = runtime.get_flat_storage_manager();
     if let Some(shard_uid) = shard_uid {
@@ -1529,6 +1535,7 @@ fn print_state_stats_for_shard_uid(
     // Print the key/value size distribution
     kv_stats.read().print_stats();
 
+    tracing::info!(target: "state_viewer", "{block_hash:?}");
     tracing::info!(target: "state_viewer", "{shard_uid:?}");
     tracing::info!(target: "state_viewer", "{state_stats:#?}");
 }
