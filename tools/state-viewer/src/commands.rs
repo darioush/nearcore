@@ -68,6 +68,112 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use yansi::Color::Red;
 
+/// Bucket definitions for key size distribution (in bytes)
+const KEY_BUCKETS: &[u64] = &[10, 50, 100, 500, 1_000, 5_000, u64::MAX];
+const KEY_BUCKET_LABELS: &[&str] =
+    &["0-10", "11-50", "51-100", "101-500", "501-1K", "1K-5K", "5K+"];
+
+/// Bucket definitions for value size distribution (in bytes)
+const VALUE_BUCKETS: &[u64] = &[100, 1_000, 10_000, 100_000, 1_000_000, u64::MAX];
+const VALUE_BUCKET_LABELS: &[&str] = &["0-100", "101-1K", "1K-10K", "10K-100K", "100K-1M", "1M+"];
+
+/// Statistics for size distribution in buckets
+#[derive(Debug, Default)]
+struct SizeDistribution {
+    /// Count of entries in each bucket
+    counts: Vec<u64>,
+    /// Total bytes in each bucket
+    total_bytes: Vec<u64>,
+    /// Overall statistics
+    total_entries: u64,
+    total_size: u64,
+    min_size: u64,
+    max_size: u64,
+}
+
+impl SizeDistribution {
+    fn new(bucket_count: usize) -> Self {
+        Self {
+            counts: vec![0; bucket_count],
+            total_bytes: vec![0; bucket_count],
+            total_entries: 0,
+            total_size: 0,
+            min_size: u64::MAX,
+            max_size: 0,
+        }
+    }
+
+    fn add_entry(&mut self, size: u64, buckets: &[u64]) {
+        self.total_entries += 1;
+        self.total_size += size;
+        self.min_size = self.min_size.min(size);
+        self.max_size = self.max_size.max(size);
+
+        // Find the appropriate bucket
+        let bucket_idx = buckets
+            .iter()
+            .position(|&bucket_limit| size <= bucket_limit)
+            .unwrap_or(buckets.len() - 1);
+
+        self.counts[bucket_idx] += 1;
+        self.total_bytes[bucket_idx] += size;
+    }
+
+    fn print_distribution(&self, name: &str, bucket_labels: &[&str]) {
+        println!("\n{} Size Distribution:", name);
+        println!(
+            "  Total entries: {}, Total size: {}",
+            self.total_entries,
+            ByteSize::b(self.total_size)
+        );
+        if self.total_entries > 0 {
+            println!("  Min: {} bytes, Max: {} bytes", self.min_size, self.max_size);
+        }
+        println!();
+
+        for (i, (&count, &total_bytes)) in
+            self.counts.iter().zip(self.total_bytes.iter()).enumerate()
+        {
+            if count > 0 {
+                let percentage = (count as f64 / self.total_entries as f64) * 100.0;
+                println!(
+                    "  {:>8} bytes: {:>8} entries ({:>5.1}%), {:>8} total",
+                    bucket_labels[i],
+                    count,
+                    percentage,
+                    ByteSize::b(total_bytes)
+                );
+            }
+        }
+    }
+}
+
+/// Combined key/value distribution statistics
+#[derive(Debug, Default)]
+struct KVSizeStats {
+    key_distribution: SizeDistribution,
+    value_distribution: SizeDistribution,
+}
+
+impl KVSizeStats {
+    fn new() -> Self {
+        Self {
+            key_distribution: SizeDistribution::new(KEY_BUCKETS.len()),
+            value_distribution: SizeDistribution::new(VALUE_BUCKETS.len()),
+        }
+    }
+
+    fn add_kv_pair(&mut self, key_size: u64, value_size: u64) {
+        self.key_distribution.add_entry(key_size, KEY_BUCKETS);
+        self.value_distribution.add_entry(value_size, VALUE_BUCKETS);
+    }
+
+    fn print_stats(&self) {
+        self.key_distribution.print_distribution("Key", KEY_BUCKET_LABELS);
+        self.value_distribution.print_distribution("Value", VALUE_BUCKET_LABELS);
+    }
+}
+
 pub(crate) fn apply_block(
     block_hash: CryptoHash,
     shard_id: ShardId,
@@ -1386,14 +1492,11 @@ fn print_state_stats_for_shard_uid(
 
     let mut state_stats = StateStats::default();
 
-    let ks = Arc::new(RwLock::new(0u64));
-    let vs = Arc::new(RwLock::new(0u64));
+    let kv_stats = Arc::new(RwLock::new(KVSizeStats::new()));
     let cb = {
-        let ks = ks.clone();
-        let vs = vs.clone();
+        let kv_stats = kv_stats.clone();
         Box::new(move |k: ByteSize, v: ByteSize| {
-            *ks.write() += k.as_u64();
-            *vs.write() += v.as_u64();
+            kv_stats.write().add_kv_pair(k.as_u64(), v.as_u64());
         })
     };
 
@@ -1422,7 +1525,9 @@ fn print_state_stats_for_shard_uid(
     //     current_size = new_size;
     // }
 
-    tracing::info!(target: "state_viewer", ks=*ks.read(), vs=*vs.read(), "kvs");
+    // Print the key/value size distribution
+    kv_stats.read().print_stats();
+
     tracing::info!(target: "state_viewer", "{shard_uid:?}");
     tracing::info!(target: "state_viewer", "{state_stats:#?}");
 }
