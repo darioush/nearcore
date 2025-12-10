@@ -736,7 +736,7 @@ fn test_create_account_with_transfer_and_full_key() {
         },
         a2, Action::AddKey(add_key_action), {
             assert_eq!(add_key_action.public_key, signer_new_account.public_key());
-            assert_eq!(add_key_action.access_key.nonce, 0);
+            assert_eq!(add_key_action.access_key.nonce(), 0);
             assert_eq!(add_key_action.access_key.permission(), &AccessKeyPermission::FullAccess);
         }
     );
@@ -861,7 +861,7 @@ fn test_account_factory() {
         },
         a2, Action::AddKey(add_key_action), {
             assert_eq!(add_key_action.public_key, signer_new_account.public_key());
-            assert_eq!(add_key_action.access_key.nonce, 0);
+            assert_eq!(add_key_action.access_key.nonce(), 0);
             assert_eq!(add_key_action.access_key.permission(), &AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: Some(TESTING_INIT_BALANCE.checked_div(2).unwrap()),
                 receiver_id: "near_1".parse().unwrap(),
@@ -1020,7 +1020,7 @@ fn test_create_account_add_key_call_delete_key_delete_account() {
         },
         a2, Action::AddKey(add_key_action), {
             assert_eq!(add_key_action.public_key, signer_new_account.public_key());
-            assert_eq!(add_key_action.access_key.nonce, 1);
+            assert_eq!(add_key_action.access_key.nonce(), 1);
             assert_eq!(add_key_action.access_key.permission(), &AccessKeyPermission::FullAccess);
         },
         a3, Action::DeployContract(DeployContractAction{code}), {

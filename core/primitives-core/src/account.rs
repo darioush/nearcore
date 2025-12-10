@@ -464,7 +464,7 @@ pub struct AccessKey {
     /// Nonce for this access key, used for tx nonce generation. When access key is created, nonce
     /// is set to `(block_height - 1) * 1e6` to avoid tx hash collision on access key re-creation.
     /// See <https://github.com/near/nearcore/issues/3779> for more details.
-    pub nonce: Nonce,
+    nonce: Nonce,
 
     /// Defines permissions for this access key.
     permission: AccessKeyPermission,
@@ -507,6 +507,14 @@ impl AccessKey {
 
     pub fn permission(&self) -> &AccessKeyPermission {
         &self.permission
+    }
+
+    pub fn nonce(&self) -> Nonce {
+        self.nonce
+    }
+
+    pub fn nonce_mut(&mut self) -> &mut Nonce {
+        &mut self.nonce
     }
 }
 

@@ -199,8 +199,9 @@ pub fn verify_and_charge_tx_ephemeral(
     let TransactionCost { gas_burnt, gas_remaining, receipt_gas_price, total_cost, burnt_amount } =
         *transaction_cost;
     let signer_id = tx.signer_id();
-    if tx.nonce() <= access_key.nonce {
-        let err = InvalidTxError::InvalidNonce { tx_nonce: tx.nonce(), ak_nonce: access_key.nonce };
+    if tx.nonce() <= access_key.nonce() {
+        let err =
+            InvalidTxError::InvalidNonce { tx_nonce: tx.nonce(), ak_nonce: access_key.nonce() };
         return Err(err.into());
     }
     if let Some(height) = block_height {
@@ -278,7 +279,7 @@ pub fn verify_and_charge_tx_ephemeral(
         }
     };
 
-    access_key.nonce = tx.nonce();
+    *access_key.nonce_mut() = tx.nonce();
     signer.set_amount(new_amount);
     Ok(VerificationResult { gas_burnt, gas_remaining, receipt_gas_price, burnt_amount })
 }
@@ -1105,7 +1106,7 @@ mod tests {
 
         let access_key =
             get_access_key(&state_update, &alice_account(), &signer.public_key()).unwrap().unwrap();
-        assert_eq!(access_key.nonce, 1);
+        assert_eq!(access_key.nonce(), 1);
     }
 
     #[test]

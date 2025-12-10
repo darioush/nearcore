@@ -508,7 +508,7 @@ pub(crate) fn action_implicit_account_creation_transfer(
     match account_id.get_account_type() {
         AccountType::NearImplicitAccount => {
             let mut access_key = AccessKey::full_access();
-            access_key.nonce = initial_nonce_value(block_height);
+            *access_key.nonce_mut() = initial_nonce_value(block_height);
 
             // unwrap: here it's safe because the `account_id` has already been determined to be implicit by `get_account_type`
             let public_key = PublicKey::from_near_implicit_account(account_id).unwrap();
@@ -760,7 +760,7 @@ pub(crate) fn action_add_key(
         return Ok(());
     }
     let mut access_key = add_key.access_key.clone();
-    access_key.nonce = initial_nonce_value(apply_state.block_height);
+    *access_key.nonce_mut() = initial_nonce_value(apply_state.block_height);
     set_access_key(state_update, account_id.clone(), add_key.public_key.clone(), &access_key);
 
     let storage_config = &apply_state.config.fees.storage_usage_config;
@@ -914,10 +914,11 @@ fn validate_delegate_action_key(
         }
     };
 
-    if delegate_action.nonce <= access_key.nonce {
+    // TODO(gas-keys): What happens here for gas keys?
+    if delegate_action.nonce <= access_key.nonce() {
         result.result = Err(ActionErrorKind::DelegateActionInvalidNonce {
             delegate_nonce: delegate_action.nonce,
-            ak_nonce: access_key.nonce,
+            ak_nonce: access_key.nonce(),
         }
         .into());
         return Ok(());
@@ -934,7 +935,7 @@ fn validate_delegate_action_key(
         return Ok(());
     }
 
-    access_key.nonce = delegate_action.nonce;
+    *access_key.nonce_mut() = delegate_action.nonce;
 
     let actions = delegate_action.get_actions();
 

@@ -434,7 +434,7 @@ fn abi_encode(target: String, action: Action) -> Vec<u8> {
                 PublicKey::ED25519(key) => (0, key.as_ref().to_vec()),
                 PublicKey::SECP256K1(key) => (1, key.as_ref().to_vec()),
             };
-            let nonce = add_key.access_key.nonce;
+            let nonce = add_key.access_key.nonce();
             let (is_full_access, is_limited_allowance, allowance, receiver_id, method_names) =
                 match add_key.access_key.permission() {
                     // TODO(gas-keys): handle GasKey permissions
