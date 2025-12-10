@@ -819,7 +819,7 @@ fn deploy_action(size: ActionSize) -> Action {
 fn add_full_access_key_action() -> Action {
     Action::AddKey(Box::new(near_primitives::transaction::AddKeyAction {
         public_key: PublicKey::from_seed(KeyType::ED25519, "full-access-key-seed"),
-        access_key: AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess },
+        access_key: AccessKey::full_access(),
     }))
 }
 
@@ -830,14 +830,14 @@ fn add_fn_access_key_action(size: ActionSize) -> Action {
     let receiver_id = "a".repeat(AccountId::MAX_LEN).parse().unwrap();
     Action::AddKey(Box::new(near_primitives::transaction::AddKeyAction {
         public_key: PublicKey::from_seed(KeyType::ED25519, "seed"),
-        access_key: AccessKey {
-            nonce: 0,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        access_key: AccessKey::new(
+            0,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: Some(Balance::from_yoctonear(1)),
                 receiver_id,
                 method_names,
             }),
-        },
+        ),
     }))
 }
 

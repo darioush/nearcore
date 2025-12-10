@@ -580,7 +580,7 @@ fn add_key_transaction(
     let receiver = sender.clone();
 
     let public_key = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847".parse().unwrap();
-    let access_key = AccessKey { nonce: 0, permission };
+    let access_key = AccessKey::new(0, permission);
 
     tb.transaction_from_actions(
         sender,

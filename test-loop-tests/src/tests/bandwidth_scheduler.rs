@@ -27,7 +27,7 @@ use near_chain::{ChainStoreAccess, ReceiptFilter, get_incoming_receipts_for_shar
 use near_chain_configs::test_genesis::{TestEpochConfigBuilder, ValidatorsSpec};
 use near_client::{Client, RpcHandlerActor};
 use near_crypto::Signer;
-use near_primitives::account::{AccessKey, AccessKeyPermission};
+use near_primitives::account::AccessKey;
 use near_primitives::action::{Action, FunctionCallAction};
 use near_primitives::bandwidth_scheduler::{
     BandwidthRequest, BandwidthRequests, BandwidthSchedulerParams,
@@ -590,7 +590,7 @@ impl WorkloadGenerator {
                         account.clone(),
                         &usable_signer.clone().into(),
                         new_signer.public_key(),
-                        AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess },
+                        AccessKey::full_access(),
                         last_block_hash,
                     ));
 

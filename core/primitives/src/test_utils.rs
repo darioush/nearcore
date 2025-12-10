@@ -1,4 +1,4 @@
-use crate::account::{AccessKey, AccessKeyPermission, Account};
+use crate::account::{AccessKey, Account};
 use crate::action::{
     DeployGlobalContractAction, DeterministicStateInitAction, GlobalContractDeployMode,
     GlobalContractIdentifier, UseGlobalContractAction,
@@ -266,7 +266,7 @@ impl SignedTransaction {
                 Action::CreateAccount(CreateAccountAction {}),
                 Action::AddKey(Box::new(AddKeyAction {
                     public_key,
-                    access_key: AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess },
+                    access_key: AccessKey::full_access(),
                 })),
                 Action::Transfer(TransferAction { deposit: amount }),
             ],
@@ -360,7 +360,7 @@ impl SignedTransaction {
                 Action::CreateAccount(CreateAccountAction {}),
                 Action::AddKey(Box::new(AddKeyAction {
                     public_key,
-                    access_key: AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess },
+                    access_key: AccessKey::full_access(),
                 })),
                 Action::Transfer(TransferAction { deposit: amount }),
                 Action::DeployContract(DeployContractAction { code }),

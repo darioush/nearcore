@@ -486,10 +486,10 @@ impl TestGenesisBuilder {
                 records.push(StateRecord::AccessKey {
                     account_id: user_account.account_id.clone(),
                     public_key: access_key.clone(),
-                    access_key: AccessKey {
-                        nonce: 0,
-                        permission: near_primitives::account::AccessKeyPermission::FullAccess,
-                    },
+                    access_key: AccessKey::new(
+                        0,
+                        near_primitives::account::AccessKeyPermission::FullAccess,
+                    ),
                 });
             }
         }

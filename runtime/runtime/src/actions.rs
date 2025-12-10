@@ -7,7 +7,7 @@ use crate::receipt_manager::ReceiptManager;
 use crate::{ActionResult, ApplyState, metrics};
 use near_crypto::PublicKey;
 use near_parameters::{AccountCreationConfig, ActionCosts, RuntimeConfig, RuntimeFeesConfig};
-use near_primitives::account::{AccessKey, AccessKeyPermission, Account, AccountContract};
+use near_primitives::account::{AccessKey, Account, AccountContract};
 use near_primitives::action::delegate::{DelegateAction, SignedDelegateAction};
 use near_primitives::config::ViewConfig;
 use near_primitives::errors::{ActionError, ActionErrorKind, InvalidAccessKeyError, RuntimeError};
@@ -424,9 +424,7 @@ pub(crate) fn try_refund_allowance(
 ) -> Result<(), StorageError> {
     if let Some(mut access_key) = get_access_key(state_update, account_id, public_key)? {
         let mut updated = false;
-        if let AccessKeyPermission::FunctionCall(function_call_permission) =
-            &mut access_key.permission
-        {
+        if let Some(function_call_permission) = access_key.function_call_permission_mut() {
             if let Some(allowance) = function_call_permission.allowance.as_mut() {
                 let new_allowance = allowance.saturating_add(deposit);
                 if new_allowance > *allowance {
@@ -942,7 +940,7 @@ fn validate_delegate_action_key(
 
     // The restriction of "function call" access keys:
     // the transaction must contain the only `FunctionCall` if "function call" access key is used
-    if let AccessKeyPermission::FunctionCall(ref function_call_permission) = access_key.permission {
+    if let Some(function_call_permission) = access_key.function_call_permission() {
         if actions.len() != 1 {
             result.result = Err(ActionErrorKind::DelegateActionAccessKeyError(
                 InvalidAccessKeyError::RequiresFullAccess,
@@ -1166,7 +1164,7 @@ mod tests {
     use super::*;
     use crate::actions_test_utils::{setup_account, test_delete_large_account};
     use crate::near_primitives::shard_layout::ShardUId;
-    use near_primitives::account::FunctionCallPermission;
+    use near_primitives::account::{AccessKeyPermission, FunctionCallPermission};
     use near_primitives::action::delegate::NonDelegateAction;
     use near_primitives::apply::ApplyChunkReason;
     use near_primitives::bandwidth_scheduler::BlockBandwidthRequests;
@@ -1421,7 +1419,7 @@ mod tests {
         let (action_receipt, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1463,7 +1461,7 @@ mod tests {
         let (action_receipt, mut signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1492,7 +1490,7 @@ mod tests {
         let (action_receipt, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         // Setup current block as higher than max_block_height. Must fail.
         let apply_state =
@@ -1519,7 +1517,7 @@ mod tests {
         let (action_receipt, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1564,7 +1562,7 @@ mod tests {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = &signed_delegate_action.delegate_action.sender_id;
         let sender_pub_key = &signed_delegate_action.delegate_action.public_key;
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1619,7 +1617,7 @@ mod tests {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1654,10 +1652,10 @@ mod tests {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey {
-            nonce: signed_delegate_action.delegate_action.nonce,
-            permission: AccessKeyPermission::FullAccess,
-        };
+        let access_key = AccessKey::new(
+            signed_delegate_action.delegate_action.nonce,
+            AccessKeyPermission::FullAccess,
+        );
 
         let apply_state =
             create_apply_state(signed_delegate_action.delegate_action.max_block_height);
@@ -1686,7 +1684,7 @@ mod tests {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
         let sender_id = signed_delegate_action.delegate_action.sender_id.clone();
         let sender_pub_key = signed_delegate_action.delegate_action.public_key.clone();
-        let access_key = AccessKey { nonce: 19000000, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::new(19000000, AccessKeyPermission::FullAccess);
 
         let apply_state = create_apply_state(1);
         let mut state_update = setup_account(&sender_id, &sender_pub_key, &access_key);
@@ -1733,14 +1731,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_function_call() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: signed_delegate_action.delegate_action.receiver_id.to_string(),
                 method_names: vec!["test_method".parse().unwrap()],
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions =
@@ -1757,14 +1755,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_incorrect_action() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: signed_delegate_action.delegate_action.receiver_id.to_string(),
                 method_names: vec!["test_method".parse().unwrap()],
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions =
@@ -1784,14 +1782,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_actions_number() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: signed_delegate_action.delegate_action.receiver_id.to_string(),
                 method_names: vec!["test_method".parse().unwrap()],
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions = vec![
@@ -1823,14 +1821,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_function_call_deposit() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: signed_delegate_action.delegate_action.receiver_id.to_string(),
                 method_names: Vec::new(),
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions =
@@ -1855,14 +1853,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_receiver_id() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: "another.near".parse().unwrap(),
                 method_names: Vec::new(),
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions =
@@ -1890,14 +1888,14 @@ mod tests {
     #[test]
     fn test_delegate_action_key_permissions_method() {
         let (_, signed_delegate_action) = create_delegate_action_receipt();
-        let access_key = AccessKey {
-            nonce: 19000000,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        let access_key = AccessKey::new(
+            19000000,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: signed_delegate_action.delegate_action.receiver_id.to_string(),
                 method_names: vec!["another_method".parse().unwrap()],
             }),
-        };
+        );
 
         let mut delegate_action = signed_delegate_action.delegate_action;
         delegate_action.actions =

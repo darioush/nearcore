@@ -188,7 +188,7 @@ mod tests {
         let account_id: AccountId = "alice.near".parse().unwrap();
         let public_key: PublicKey =
             "ed25519:32LnPNBZQJ3uhY8yV6JqnNxtRW8E27Ps9YD1XeUNuA1m".parse().unwrap();
-        let access_key = AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess };
+        let access_key = AccessKey::full_access();
         (account_id, public_key, access_key)
     }
 
@@ -391,11 +391,8 @@ mod tests {
         let account_id: AccountId = "alice".parse().unwrap();
         let public_keys: Vec<PublicKey> =
             (0..3).map(|_| SecretKey::from_random(KeyType::ED25519).public_key()).collect();
-        let mut state_update = setup_account(
-            &account_id,
-            &public_keys[0],
-            &AccessKey { nonce: 0, permission: AccessKeyPermission::FullAccess },
-        );
+        let mut state_update =
+            setup_account(&account_id, &public_keys[0], &AccessKey::full_access());
         let mut account = get_account(&state_update, &account_id).unwrap().unwrap();
         for public_key in &public_keys {
             add_gas_key_to_account(&mut state_update, &mut account, &account_id, public_key);

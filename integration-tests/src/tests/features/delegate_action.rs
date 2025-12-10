@@ -822,14 +822,14 @@ fn fn_access_key(
     receiver_id: String,
     method_names: Vec<String>,
 ) -> AccessKey {
-    AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(initial_allowance),
             receiver_id,
             method_names,
         }),
-    }
+    )
 }
 
 /// Test account creation scenarios with meta transactions.

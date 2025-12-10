@@ -67,7 +67,7 @@ fn map_delegate_action(
         if let Some(a) = map_action(action, secret, default_key, false) {
             match &a {
                 Action::AddKey(add_key) => {
-                    if add_key.access_key.permission == AccessKeyPermission::FullAccess {
+                    if add_key.access_key.is_full_access() {
                         full_key_added = true;
                     }
                 }
@@ -131,7 +131,7 @@ fn map_action_receipt(
         if let Some(a) = map_action(action, secret, default_key, true) {
             match &a {
                 Action::AddKey(add_key) => {
-                    if add_key.access_key.permission == AccessKeyPermission::FullAccess {
+                    if add_key.access_key.is_full_access() {
                         full_key_added = true;
                     }
                 }
@@ -220,7 +220,7 @@ pub(crate) fn map_records<P: AsRef<Path>>(
                 };
                 // TODO(eth-implicit) Change back to is_implicit() when ETH-implicit accounts are supported.
                 if account_id.get_account_type() != AccountType::NearImplicitAccount
-                    && access_key.permission == AccessKeyPermission::FullAccess
+                    && access_key.is_full_access()
                 {
                     has_full_key.insert(account_id.clone());
                 }
@@ -344,14 +344,14 @@ mod test {
                         public_key: "ed25519:FXXrTXiKWpXj1R6r5fBvMLpstd8gPyrBq3qMByqKVzKF"
                             .parse()
                             .unwrap(),
-                        access_key: AccessKey {
-                            nonce: 0,
-                            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                        access_key: AccessKey::new(
+                            0,
+                            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                                 allowance: None,
                                 receiver_id: "foo.near".parse().unwrap(),
                                 method_names: vec![String::from("do_thing")],
                             }),
-                        },
+                        ),
                     })),
                 ],
             }),
@@ -374,14 +374,14 @@ mod test {
                         public_key: "ed25519:FYcGnVNM6wTcvm9b4UenJuCiiL9wDaJ3mpoebF4Go4mc"
                             .parse()
                             .unwrap(),
-                        access_key: AccessKey {
-                            nonce: 0,
-                            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                        access_key: AccessKey::new(
+                            0,
+                            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                                 allowance: None,
                                 receiver_id: "foo.near".parse().unwrap(),
                                 method_names: vec![String::from("do_thing")],
                             }),
-                        },
+                        ),
                     })),
                     Action::AddKey(Box::new(AddKeyAction {
                         public_key: default_key.clone(),

@@ -91,7 +91,7 @@ pub fn total_send_fees(
             }
             Stake(_) => fees.fee(ActionCosts::stake).send_fee(sender_is_receiver),
             AddKey(add_key_action) => permission_send_fees(
-                &add_key_action.access_key.permission,
+                &add_key_action.access_key.permission(),
                 fees,
                 sender_is_receiver,
             ),
@@ -186,6 +186,9 @@ fn permission_send_fees(
         AccessKeyPermission::FullAccess => {
             fees.fee(ActionCosts::add_full_access_key).send_fee(sender_is_receiver)
         }
+        // TODO(gas-keys): properly handle GasKey fees
+        near_primitives::account::AccessKeyPermission::GasKeyFunctionCall(_, _) => Gas::ZERO,
+        near_primitives::account::AccessKeyPermission::GasKeyFullAccess(_) => Gas::ZERO,
     }
 }
 
@@ -256,7 +259,9 @@ pub fn exec_fee(config: &RuntimeConfig, action: &Action, receiver_id: &AccountId
             Gas::ZERO
         }
         Stake(_) => fees.fee(ActionCosts::stake).exec_fee(),
-        AddKey(add_key_action) => permission_exec_fees(&add_key_action.access_key.permission, fees),
+        AddKey(add_key_action) => {
+            permission_exec_fees(&add_key_action.access_key.permission(), fees)
+        }
         AddGasKey(_add_gas_key_action) => {
             // TODO(gas-keys): properly handle GasKey fees
             Gas::ZERO
@@ -315,6 +320,9 @@ fn permission_exec_fees(permission: &AccessKeyPermission, fees: &RuntimeFeesConf
             base_fee.checked_add(all_bytes_fee).unwrap()
         }
         AccessKeyPermission::FullAccess => fees.fee(ActionCosts::add_full_access_key).exec_fee(),
+        // TODO(gas-keys): properly handle GasKey fees
+        near_primitives::account::AccessKeyPermission::GasKeyFunctionCall(_, _) => Gas::ZERO,
+        near_primitives::account::AccessKeyPermission::GasKeyFullAccess(_) => Gas::ZERO,
     }
 }
 

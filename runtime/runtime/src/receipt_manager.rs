@@ -501,7 +501,7 @@ impl ReceiptManager {
             receipt_index,
             Action::AddKey(Box::new(AddKeyAction {
                 public_key,
-                access_key: AccessKey { nonce, permission: AccessKeyPermission::FullAccess },
+                access_key: AccessKey::new(nonce, AccessKeyPermission::FullAccess),
             })),
         );
     }
@@ -536,9 +536,9 @@ impl ReceiptManager {
             receipt_index,
             Action::AddKey(Box::new(AddKeyAction {
                 public_key,
-                access_key: AccessKey {
+                access_key: AccessKey::new(
                     nonce,
-                    permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                    AccessKeyPermission::FunctionCall(FunctionCallPermission {
                         allowance,
                         receiver_id: receiver_id.into(),
                         method_names: method_names
@@ -549,7 +549,7 @@ impl ReceiptManager {
                             })
                             .collect::<std::result::Result<Vec<_>, _>>()?,
                     }),
-                },
+                ),
             })),
         );
         Ok(())

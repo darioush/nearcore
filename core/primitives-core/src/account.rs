@@ -467,7 +467,7 @@ pub struct AccessKey {
     pub nonce: Nonce,
 
     /// Defines permissions for this access key.
-    pub permission: AccessKeyPermission,
+    permission: AccessKeyPermission,
 }
 
 impl AccessKey {
@@ -475,6 +475,38 @@ impl AccessKey {
 
     pub fn full_access() -> Self {
         Self { nonce: 0, permission: AccessKeyPermission::FullAccess }
+    }
+
+    pub fn new(nonce: Nonce, permission: AccessKeyPermission) -> Self {
+        Self { nonce, permission }
+    }
+
+    pub fn is_full_access(&self) -> bool {
+        match &self.permission {
+            AccessKeyPermission::FullAccess | AccessKeyPermission::GasKeyFullAccess(_) => true,
+            AccessKeyPermission::FunctionCall(_)
+            | AccessKeyPermission::GasKeyFunctionCall(_, _) => false,
+        }
+    }
+
+    pub fn function_call_permission(&self) -> Option<&FunctionCallPermission> {
+        match &self.permission {
+            AccessKeyPermission::GasKeyFunctionCall(_, permission)
+            | AccessKeyPermission::FunctionCall(permission) => Some(permission),
+            AccessKeyPermission::FullAccess | AccessKeyPermission::GasKeyFullAccess(_) => None,
+        }
+    }
+
+    pub fn function_call_permission_mut(&mut self) -> Option<&mut FunctionCallPermission> {
+        match &mut self.permission {
+            AccessKeyPermission::GasKeyFunctionCall(_, permission)
+            | AccessKeyPermission::FunctionCall(permission) => Some(permission),
+            AccessKeyPermission::FullAccess | AccessKeyPermission::GasKeyFullAccess(_) => None,
+        }
+    }
+
+    pub fn permission(&self) -> &AccessKeyPermission {
+        &self.permission
     }
 }
 
@@ -529,6 +561,28 @@ pub enum AccessKeyPermission {
     /// Grants full access to the account.
     /// NOTE: It's used to replace account-level public keys.
     FullAccess,
+
+    GasKeyFunctionCall(GasKeyData, FunctionCallPermission),
+    GasKeyFullAccess(GasKeyData),
+}
+
+#[derive(
+    BorshSerialize,
+    BorshDeserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    ProtocolSchema,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+
+pub struct GasKeyData {
+    pub balance: Balance,
+    pub num_nonces: NonceIndex,
 }
 
 /// Grants limited permission to make transactions with FunctionCallActions

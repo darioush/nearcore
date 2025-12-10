@@ -3,7 +3,7 @@ use crate::config::{TransactionCost, total_prepaid_gas};
 use crate::near_primitives::account::Account;
 use near_crypto::key_conversion::is_valid_staking_key;
 use near_parameters::RuntimeConfig;
-use near_primitives::account::{AccessKey, AccessKeyPermission, GasKey};
+use near_primitives::account::{AccessKey, AccessKeyPermission, FunctionCallPermission, GasKey};
 use near_primitives::action::delegate::SignedDelegateAction;
 use near_primitives::action::{
     AddGasKeyAction, AddKeyAction, DeployGlobalContractAction, DeterministicStateInitAction,
@@ -218,7 +218,7 @@ pub fn verify_and_charge_tx_ephemeral(
         return Err(err.into());
     };
 
-    if let AccessKeyPermission::FunctionCall(ref mut perms) = access_key.permission {
+    if let Some(perms) = access_key.function_call_permission_mut() {
         if let Some(ref mut allowance) = perms.allowance {
             *allowance = allowance.checked_sub(total_cost).ok_or_else(|| {
                 InvalidTxError::InvalidAccessKeyError(InvalidAccessKeyError::NotEnoughAllowance {
@@ -242,7 +242,7 @@ pub fn verify_and_charge_tx_ephemeral(
         }
     };
 
-    if let AccessKeyPermission::FunctionCall(ref function_call_permission) = access_key.permission {
+    if let Some(function_call_permission) = access_key.function_call_permission() {
         if tx.actions().len() != 1 {
             let err = InvalidAccessKeyError::RequiresFullAccess;
             return Err(InvalidTxError::InvalidAccessKeyError(err).into());
@@ -558,50 +558,51 @@ fn validate_add_key_action(
     limit_config: &LimitConfig,
     action: &AddKeyAction,
 ) -> Result<(), ActionsValidationError> {
-    validate_access_key_permission(limit_config, &action.access_key.permission)
+    if let Some(fc) = action.access_key.function_call_permission() {
+        validate_function_call_permission(limit_config, fc)?;
+    };
+    Ok(())
 }
 
 /// Validates `AccessKeyPermission`. If the access key permission is `FunctionCall`, checks that the
 /// total number of bytes of the method names doesn't exceed the limit and
 /// every method name length doesn't exceed the limit.
-fn validate_access_key_permission(
+fn validate_function_call_permission(
     limit_config: &LimitConfig,
-    permission: &AccessKeyPermission,
+    fc: &FunctionCallPermission,
 ) -> Result<(), ActionsValidationError> {
-    if let AccessKeyPermission::FunctionCall(fc) = permission {
-        // Check whether `receiver_id` is a valid account_id. Historically, we
-        // allowed arbitrary strings there!
-        match limit_config.account_id_validity_rules_version {
-            near_primitives_core::config::AccountIdValidityRulesVersion::V0 => (),
-            near_primitives_core::config::AccountIdValidityRulesVersion::V1
-            | near_primitives_core::config::AccountIdValidityRulesVersion::V2 => {
-                if let Err(_) = fc.receiver_id.parse::<AccountId>() {
-                    return Err(ActionsValidationError::InvalidAccountId {
-                        account_id: truncate_string(&fc.receiver_id, AccountId::MAX_LEN * 2),
-                    });
-                }
-            }
-        }
-
-        // Checking method name length limits
-        let mut total_number_of_bytes = 0;
-        for method_name in &fc.method_names {
-            let length = method_name.len() as u64;
-            if length > limit_config.max_length_method_name {
-                return Err(ActionsValidationError::AddKeyMethodNameLengthExceeded {
-                    length,
-                    limit: limit_config.max_length_method_name,
+    // Check whether `receiver_id` is a valid account_id. Historically, we
+    // allowed arbitrary strings there!
+    match limit_config.account_id_validity_rules_version {
+        near_primitives_core::config::AccountIdValidityRulesVersion::V0 => (),
+        near_primitives_core::config::AccountIdValidityRulesVersion::V1
+        | near_primitives_core::config::AccountIdValidityRulesVersion::V2 => {
+            if let Err(_) = fc.receiver_id.parse::<AccountId>() {
+                return Err(ActionsValidationError::InvalidAccountId {
+                    account_id: truncate_string(&fc.receiver_id, AccountId::MAX_LEN * 2),
                 });
             }
-            // Adding terminating character to the total number of bytes
-            total_number_of_bytes += length + 1;
         }
-        if total_number_of_bytes > limit_config.max_number_bytes_method_names {
-            return Err(ActionsValidationError::AddKeyMethodNamesNumberOfBytesExceeded {
-                total_number_of_bytes,
-                limit: limit_config.max_number_bytes_method_names,
+    }
+
+    // Checking method name length limits
+    let mut total_number_of_bytes = 0;
+    for method_name in &fc.method_names {
+        let length = method_name.len() as u64;
+        if length > limit_config.max_length_method_name {
+            return Err(ActionsValidationError::AddKeyMethodNameLengthExceeded {
+                length,
+                limit: limit_config.max_length_method_name,
             });
         }
+        // Adding terminating character to the total number of bytes
+        total_number_of_bytes += length + 1;
+    }
+    if total_number_of_bytes > limit_config.max_number_bytes_method_names {
+        return Err(ActionsValidationError::AddKeyMethodNamesNumberOfBytesExceeded {
+            total_number_of_bytes,
+            limit: limit_config.max_number_bytes_method_names,
+        });
     }
 
     Ok(())
@@ -681,8 +682,9 @@ fn validate_add_gas_key_action(
     current_protocol_version: u32,
 ) -> Result<(), ActionsValidationError> {
     require_protocol_feature(ProtocolFeature::GasKeys, "GasKeys", current_protocol_version)?;
-    validate_access_key_permission(limit_config, &action.permission)?;
+    // TODO(gas-keys): In new model, action for adding gas key will not be here.
     if let AccessKeyPermission::FunctionCall(fc) = &action.permission {
+        validate_function_call_permission(limit_config, fc)?;
         if fc.allowance.is_some() {
             return Err(ActionsValidationError::GasKeyPermissionInvalid {
                 permission: action.permission.clone().into(),
@@ -971,14 +973,14 @@ mod tests {
                 access_keys.push(AccessKey::full_access());
             }
             for _ in 0..num_function_call_access_keys {
-                let access_key = AccessKey {
-                    nonce: 0,
-                    permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                let access_key = AccessKey::new(
+                    0,
+                    AccessKeyPermission::FunctionCall(FunctionCallPermission {
                         allowance: Some(Balance::from_yoctonear(100)),
                         receiver_id: "a".repeat(64),
                         method_names: vec![],
                     }),
-                };
+                );
                 access_keys.push(access_key);
             }
             let (_, state_update, _) = setup_accounts(vec![(
@@ -1032,14 +1034,14 @@ mod tests {
                 account_id.clone(),
                 Balance::ZERO,
                 Balance::ZERO,
-                vec![AccessKey {
-                    nonce: 0,
-                    permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                vec![AccessKey::new(
+                    0,
+                    AccessKeyPermission::FunctionCall(FunctionCallPermission {
                         allowance: Some(Balance::from_yoctonear(100)),
                         receiver_id: bob_account().into(),
                         method_names,
                     }),
-                }],
+                )],
                 false,
                 false,
             )]);
@@ -1231,7 +1233,7 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey { nonce: 2, permission: AccessKeyPermission::FullAccess }),
+            Some(AccessKey::new(2, AccessKeyPermission::FullAccess)),
         );
 
         let transaction = SignedTransaction::send_money(
@@ -1379,14 +1381,14 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            Some(AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: Some(Balance::from_yoctonear(100)),
                     receiver_id: bob_account().into(),
                     method_names: vec![],
                 }),
-            }),
+            )),
         );
 
         let transaction = SignedTransaction::from_actions(
@@ -1520,14 +1522,14 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            Some(AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: bob_account().into(),
                     method_names: vec![],
                 }),
-            }),
+            )),
         );
 
         // Case 1
@@ -1605,14 +1607,14 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            Some(AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: bob_account().into(),
                     method_names: vec![],
                 }),
-            }),
+            )),
         );
 
         let signed_tx = SignedTransaction::from_actions(
@@ -1654,14 +1656,14 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            Some(AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: bob_account().into(),
                     method_names: vec!["not_hello".to_string(), "world".to_string()],
                 }),
-            }),
+            )),
         );
 
         let signed_tx = SignedTransaction::from_actions(
@@ -1702,14 +1704,14 @@ mod tests {
         let (signer, mut state_update, gas_price) = setup_common(
             TESTING_INIT_BALANCE,
             Balance::ZERO,
-            Some(AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            Some(AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: bob_account().into(),
                     method_names: vec![],
                 }),
-            }),
+            )),
         );
 
         let signed_tx = SignedTransaction::from_actions(
@@ -2135,14 +2137,14 @@ mod tests {
             &test_limit_config(),
             &Action::AddKey(Box::new(AddKeyAction {
                 public_key: PublicKey::empty(KeyType::ED25519),
-                access_key: AccessKey {
-                    nonce: 0,
-                    permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                access_key: AccessKey::new(
+                    0,
+                    AccessKeyPermission::FunctionCall(FunctionCallPermission {
                         allowance: Some(Balance::from_yoctonear(1000)),
                         receiver_id: alice_account().into(),
                         method_names: vec!["hello".to_string(), "world".to_string()],
                     }),
-                },
+                ),
             })),
             &"alice.near".parse().unwrap(),
             PROTOCOL_VERSION,

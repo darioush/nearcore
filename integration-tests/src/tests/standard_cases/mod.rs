@@ -1150,14 +1150,14 @@ fn assert_access_key(
 pub fn test_add_access_key_function_call(node: impl Node) {
     let node_user = node.user();
     let account_id = &node.account_id().unwrap();
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: None,
             receiver_id: account_id.to_string(),
             method_names: vec![],
         }),
-    };
+    );
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
     let result = add_access_key(&node, node_user.as_ref(), &access_key, &signer2);
 
@@ -1170,14 +1170,14 @@ pub fn test_add_access_key_function_call(node: impl Node) {
 pub fn test_delete_access_key(node: impl Node) {
     let node_user = node.user();
     let account_id = &node.account_id().unwrap();
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: None,
             receiver_id: account_id.to_string(),
             method_names: vec![],
         }),
-    };
+    );
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
     add_access_key(&node, node_user.as_ref(), &access_key, &signer2);
 
@@ -1198,14 +1198,14 @@ pub fn test_delete_access_key(node: impl Node) {
 
 pub fn test_add_access_key_with_allowance(node: impl Node) {
     let account_id = &node.account_id().unwrap();
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(Balance::from_yoctonear(10)),
             receiver_id: account_id.to_string(),
             method_names: vec![],
         }),
-    };
+    );
     let node_user = node.user();
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
     let account = node_user.view_account(account_id).unwrap();
@@ -1224,14 +1224,14 @@ pub fn test_add_access_key_with_allowance(node: impl Node) {
 
 pub fn test_delete_access_key_with_allowance(node: impl Node) {
     let account_id = &node.account_id().unwrap();
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(Balance::from_yoctonear(10)),
             receiver_id: account_id.to_string(),
             method_names: vec![],
         }),
-    };
+    );
     let node_user = node.user();
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
     let account = node_user.view_account(account_id).unwrap();
@@ -1267,14 +1267,14 @@ pub fn test_delete_access_key_with_allowance(node: impl Node) {
 }
 
 pub fn test_access_key_smart_contract(node: impl Node) {
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(FUNCTION_CALL_AMOUNT),
             receiver_id: bob_account().into(),
             method_names: vec![],
         }),
-    };
+    );
     let mut node_user = node.user();
     let account_id = &node.account_id().unwrap();
     let signer2 =
@@ -1320,9 +1320,9 @@ pub fn test_access_key_smart_contract(node: impl Node) {
     let view_access_key = node_user.get_access_key(account_id, &signer2.public_key()).unwrap();
     assert_eq!(
         view_access_key,
-        AccessKey {
-            nonce: view_access_key.nonce,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        AccessKey::new(
+            view_access_key.nonce,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: Some(
                     FUNCTION_CALL_AMOUNT
                         .checked_sub(function_call_cost)
@@ -1333,20 +1333,20 @@ pub fn test_access_key_smart_contract(node: impl Node) {
                 receiver_id: bob_account().into(),
                 method_names: vec![],
             }),
-        }
+        )
         .into()
     );
 }
 
 pub fn test_access_key_smart_contract_reject_method_name(node: impl Node) {
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(FUNCTION_CALL_AMOUNT),
             receiver_id: bob_account().into(),
             method_names: vec!["log_something".to_string()],
         }),
-    };
+    );
     let mut node_user = node.user();
     let account_id = &node.account_id().unwrap();
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
@@ -1380,14 +1380,14 @@ pub fn test_access_key_smart_contract_reject_method_name(node: impl Node) {
 }
 
 pub fn test_access_key_smart_contract_reject_contract_id(node: impl Node) {
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(FUNCTION_CALL_AMOUNT),
             receiver_id: bob_account().into(),
             method_names: vec![],
         }),
-    };
+    );
     let mut node_user = node.user();
     let account_id = &node.account_id().unwrap();
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
@@ -1422,14 +1422,14 @@ pub fn test_access_key_smart_contract_reject_contract_id(node: impl Node) {
 
 pub fn test_access_key_reject_non_function_call(node: impl Node) {
     let account_id = &node.account_id().unwrap();
-    let access_key = AccessKey {
-        nonce: 0,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let access_key = AccessKey::new(
+        0,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(FUNCTION_CALL_AMOUNT),
             receiver_id: account_id.to_string(),
             method_names: vec![],
         }),
-    };
+    );
     let mut node_user = node.user();
     let signer2 = InMemorySigner::from_random("test".parse().unwrap(), KeyType::ED25519).into();
     add_access_key(&node, node_user.as_ref(), &access_key, &signer2);

@@ -744,14 +744,14 @@ mod tests {
                 })),
                 Action::AddKey(Box::new(AddKeyAction {
                     public_key: public_key.clone(),
-                    access_key: AccessKey {
-                        nonce: 0,
-                        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                    access_key: AccessKey::new(
+                        0,
+                        AccessKeyPermission::FunctionCall(FunctionCallPermission {
                             allowance: None,
                             receiver_id: "zzz".parse().unwrap(),
                             method_names: vec!["www".to_string()],
                         }),
-                    },
+                    ),
                 })),
                 Action::DeleteKey(Box::new(DeleteKeyAction { public_key })),
                 Action::DeleteAccount(DeleteAccountAction {
@@ -785,14 +785,14 @@ mod tests {
                 })),
                 Action::AddKey(Box::new(AddKeyAction {
                     public_key: public_key.clone(),
-                    access_key: AccessKey {
-                        nonce: 0,
-                        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                    access_key: AccessKey::new(
+                        0,
+                        AccessKeyPermission::FunctionCall(FunctionCallPermission {
                             allowance: None,
                             receiver_id: "zzz".parse().unwrap(),
                             method_names: vec!["www".to_string()],
                         }),
-                    },
+                    ),
                 })),
                 Action::DeleteKey(Box::new(DeleteKeyAction { public_key })),
                 Action::DeleteAccount(DeleteAccountAction {

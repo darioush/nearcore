@@ -33,14 +33,14 @@ fn test_invalid_account_id() {
         public_key: signer.public_key(),
         actions: vec![Action::AddKey(Box::new(AddKeyAction {
             public_key: signer.public_key(),
-            access_key: AccessKey {
-                nonce: 1,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            access_key: AccessKey::new(
+                1,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: "#".to_string(),
                     method_names: vec![],
                 }),
-            },
+            ),
         }))],
         nonce: 0,
         block_hash: CryptoHash::default(),
@@ -81,14 +81,14 @@ fn test_very_long_account_id() {
         public_key: signer.public_key(),
         actions: vec![Action::AddKey(Box::new(AddKeyAction {
             public_key: signer.public_key(),
-            access_key: AccessKey {
-                nonce: 1,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            access_key: AccessKey::new(
+                1,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: None,
                     receiver_id: "A".repeat(1024),
                     method_names: vec![],
                 }),
-            },
+            ),
         }))],
         nonce: 0,
         block_hash: tip.last_block_hash,

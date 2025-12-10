@@ -450,14 +450,14 @@ fn test_eth_implicit_accounts() {
     let relayer_pk = relayer_signer.signer.public_key();
     let action = Action::AddKey(Box::new(AddKeyAction {
         public_key: relayer_pk,
-        access_key: AccessKey {
-            nonce: 0,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        access_key: AccessKey::new(
+            0,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: alice_eth_account.to_string(),
                 method_names: vec!["rlp_execute".into()],
             }),
-        },
+        ),
     }));
     let signed_transaction = create_rlp_execute_tx(
         &alice_eth_account,

@@ -23,8 +23,8 @@ use near_primitives::types::{
 use near_primitives::views::{
     ExecutionOutcomeWithIdView, ExecutionStatusView, QueryRequest, QueryResponseKind,
 };
+use near_primitives_core::account::AccessKey;
 use near_primitives_core::account::id::AccountType;
-use near_primitives_core::account::{AccessKey, AccessKeyPermission};
 use near_primitives_core::types::{Nonce, ShardId};
 use nearcore::NearNode;
 use parking_lot::{Mutex, RwLock};
@@ -942,7 +942,7 @@ impl<T: ChainAccess> TxMirror<T> {
         for action in tx.transaction.actions() {
             match &action {
                 Action::AddKey(add_key) => {
-                    if add_key.access_key.permission == AccessKeyPermission::FullAccess {
+                    if add_key.access_key.is_full_access() {
                         full_key_added = true;
                     }
                     let public_key =
@@ -1186,7 +1186,7 @@ impl<T: ChainAccess> TxMirror<T> {
         for a in actions {
             match a {
                 Action::AddKey(a) => {
-                    if a.access_key.permission == AccessKeyPermission::FullAccess {
+                    if a.access_key.is_full_access() {
                         full_key_added = true;
                     }
                     let target_public_key =

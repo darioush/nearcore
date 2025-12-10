@@ -285,14 +285,14 @@ fn test_wallet_contract_interaction() {
     let relayer_pk = relayer_signer.signer.public_key();
     let action = Action::AddKey(Box::new(AddKeyAction {
         public_key: relayer_pk,
-        access_key: AccessKey {
-            nonce: 0,
-            permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+        access_key: AccessKey::new(
+            0,
+            AccessKeyPermission::FunctionCall(FunctionCallPermission {
                 allowance: None,
                 receiver_id: eth_implicit_account.to_string(),
                 method_names: vec!["rlp_execute".into()],
             }),
-        },
+        ),
     }));
     let signed_transaction = create_rlp_execute_tx(
         &eth_implicit_account,
@@ -436,16 +436,19 @@ fn abi_encode(target: String, action: Action) -> Vec<u8> {
             };
             let nonce = add_key.access_key.nonce;
             let (is_full_access, is_limited_allowance, allowance, receiver_id, method_names) =
-                match add_key.access_key.permission {
-                    AccessKeyPermission::FullAccess => {
+                match add_key.access_key.permission() {
+                    // TODO(gas-keys): handle GasKey permissions
+                    AccessKeyPermission::GasKeyFullAccess(_) | AccessKeyPermission::FullAccess => {
                         (true, false, Balance::ZERO, String::new(), Vec::new())
                     }
-                    AccessKeyPermission::FunctionCall(permission) => (
+                    // TODO(gas-keys): handle GasKey permissions
+                    AccessKeyPermission::GasKeyFunctionCall(_, permission)
+                    | AccessKeyPermission::FunctionCall(permission) => (
                         false,
                         permission.allowance.is_some(),
                         permission.allowance.unwrap_or_default(),
-                        permission.receiver_id,
-                        permission.method_names,
+                        permission.receiver_id.clone(),
+                        permission.method_names.clone(),
                     ),
                 };
             // cspell:ignore ethabi

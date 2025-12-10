@@ -980,7 +980,7 @@ impl ForkNetworkCommand {
                     StateRecord::AccessKey { account_id, public_key, access_key } => {
                         // TODO(eth-implicit) Change back to is_implicit() when ETH-implicit accounts are supported.
                         if account_id.get_account_type() != AccountType::NearImplicitAccount
-                            && access_key.permission == AccessKeyPermission::FullAccess
+                            && access_key.is_full_access()
                         {
                             has_full_key.insert(account_id.clone());
                         }

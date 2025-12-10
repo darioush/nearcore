@@ -179,14 +179,14 @@ fn test_zero_balance_account_add_key() {
         let new_key = PublicKey::from_seed(KeyType::ED25519, format!("{}", i + 5).as_str());
         actions.push(AddKey(Box::new(AddKeyAction {
             public_key: new_key,
-            access_key: AccessKey {
-                nonce: 0,
-                permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+            access_key: AccessKey::new(
+                0,
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
                     allowance: Some(Balance::from_yoctonear(10u128.pow(12))),
                     receiver_id: "a".repeat(64),
                     method_names: vec![],
                 }),
-            },
+            ),
         })));
     }
 
@@ -268,14 +268,14 @@ fn test_storage_usage_components() {
         borsh::object_length(&full_access_key).unwrap()
     );
 
-    let fn_access_key = AccessKey {
-        nonce: u64::MAX,
-        permission: AccessKeyPermission::FunctionCall(FunctionCallPermission {
+    let fn_access_key = AccessKey::new(
+        u64::MAX,
+        AccessKeyPermission::FunctionCall(FunctionCallPermission {
             allowance: Some(Balance::MAX),
             receiver_id: "a".repeat(64),
             method_names: vec![],
         }),
-    };
+    );
     assert_eq!(
         FUNCTION_ACCESS_PERMISSION_STORAGE_USAGE,
         borsh::object_length(&fn_access_key).unwrap()
