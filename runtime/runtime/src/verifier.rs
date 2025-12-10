@@ -121,7 +121,7 @@ pub fn validate_transaction(
     if let Err(err) = validate_transaction_actions(&config, &signed_tx, current_protocol_version) {
         return Err((err, signed_tx));
     }
-    ValidatedTransaction::new(config, signed_tx)
+    ValidatedTransaction::new(config, signed_tx, current_protocol_version)
 }
 
 /// Validates a transaction contains well-formed actions and is valid for the given runtime config.
@@ -133,7 +133,7 @@ pub(crate) fn validate_transaction_well_formed<'a>(
     current_protocol_version: ProtocolVersion,
 ) -> Result<(), InvalidTxError> {
     validate_transaction_actions(config, signed_tx, current_protocol_version)?;
-    ValidatedTransaction::check_valid_for_config(config, signed_tx)
+    ValidatedTransaction::check_valid_for_config(config, signed_tx, current_protocol_version)
 }
 
 /// Set new `signer` and `access_key` in `state_update`.
@@ -146,7 +146,12 @@ pub fn set_tx_state_changes(
     access_key: &AccessKey,
 ) {
     let tx = validated_tx.to_tx();
-    set_access_key(state_update, tx.signer_id().clone(), tx.public_key().clone(), &access_key);
+    set_access_key(
+        state_update,
+        tx.signer_id().clone(),
+        tx.key().public_key().clone(),
+        &access_key,
+    );
     set_account(state_update, tx.signer_id().clone(), &signer);
 }
 
@@ -163,13 +168,14 @@ pub fn get_signer_and_access_key(
         }
     };
 
-    let access_key = match get_access_key(state_update, signer_id, validated_tx.public_key())? {
+    let access_key = match get_access_key(state_update, signer_id, validated_tx.key().public_key())?
+    {
         Some(access_key) => access_key,
         None => {
             return Err(InvalidTxError::InvalidAccessKeyError(
                 InvalidAccessKeyError::AccessKeyNotFound {
                     account_id: signer_id.clone(),
-                    public_key: validated_tx.public_key().clone().into(),
+                    public_key: validated_tx.key().public_key().clone().into(),
                 },
             )
             .into());
@@ -217,7 +223,7 @@ pub fn verify_and_charge_tx_ephemeral(
             *allowance = allowance.checked_sub(total_cost).ok_or_else(|| {
                 InvalidTxError::InvalidAccessKeyError(InvalidAccessKeyError::NotEnoughAllowance {
                     account_id: signer_id.clone(),
-                    public_key: tx.public_key().clone().into(),
+                    public_key: tx.key().public_key().clone().into(),
                     allowance: *allowance,
                     cost: total_cost,
                 })
@@ -751,7 +757,7 @@ mod tests {
     };
     use near_primitives::hash::{CryptoHash, hash};
     use near_primitives::receipt::{ActionReceipt, ReceiptPriority};
-    use near_primitives::test_utils::account_new;
+    use near_primitives::test_utils::{SignerKind, account_new};
     use near_primitives::transaction::{
         CreateAccountAction, DeleteAccountAction, DeleteKeyAction, StakeAction, TransferAction,
     };
@@ -1286,9 +1292,9 @@ mod tests {
                 alice_account(),
                 bob_account(),
                 &*signer,
+                SignerKind::AccessKey,
                 vec![Action::Transfer(TransferAction { deposit: Balance::from_yoctonear(100) })],
                 CryptoHash::default(),
-                1,
             ),
             InvalidTxError::InvalidTransactionVersion,
         );

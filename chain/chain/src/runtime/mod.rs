@@ -858,24 +858,25 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
 
                 let signer_id = validated_tx.signer_id();
-                let (signer, access_key) =
-                    if let Some((id, signer, key, _)) = &mut signer_access_key {
-                        debug_assert_eq!(signer_id, id);
-                        (signer, key)
-                    } else {
-                        let signer = get_account(&state_update, signer_id);
-                        let signer = signer.transpose().and_then(|v| v.ok());
-                        let access_key =
-                            get_access_key(&state_update, signer_id, validated_tx.public_key());
-                        let access_key = access_key.transpose().and_then(|v| v.ok());
-                        let inserted = signer_access_key.insert((
-                            signer_id.clone(),
-                            signer.ok_or(Error::InvalidTransactions)?,
-                            access_key.ok_or(Error::InvalidTransactions)?,
-                            validated_tx.public_key().clone(),
-                        ));
-                        (&mut inserted.1, &mut inserted.2)
-                    };
+                let (signer, access_key) = if let Some((id, signer, key, _)) =
+                    &mut signer_access_key
+                {
+                    debug_assert_eq!(signer_id, id);
+                    (signer, key)
+                } else {
+                    let signer = get_account(&state_update, signer_id);
+                    let signer = signer.transpose().and_then(|v| v.ok());
+                    let access_key =
+                        get_access_key(&state_update, signer_id, validated_tx.key().public_key());
+                    let access_key = access_key.transpose().and_then(|v| v.ok());
+                    let inserted = signer_access_key.insert((
+                        signer_id.clone(),
+                        signer.ok_or(Error::InvalidTransactions)?,
+                        access_key.ok_or(Error::InvalidTransactions)?,
+                        validated_tx.key().public_key().clone(),
+                    ));
+                    (&mut inserted.1, &mut inserted.2)
+                };
 
                 let verify_result =
                     tx_cost(runtime_config, &validated_tx.to_tx(), prev_block.next_gas_price)

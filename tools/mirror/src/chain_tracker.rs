@@ -432,11 +432,12 @@ impl TxTracker {
                     TxRef { source_height: block.source_height, shard_id: c.shard_id, tx_idx };
                 match tx {
                     crate::TargetChainTx::Ready(tx) => {
+                        // TODO(gas-keys): handle mirror properly.
                         let info = self
                             .nonces
                             .get_mut(&(
                                 tx.target_tx.transaction.signer_id().clone(),
-                                tx.target_tx.transaction.public_key().clone(),
+                                tx.target_tx.transaction.key().public_key().clone(),
                             ))
                             .unwrap();
                         info.queued_txs.insert(tx_ref.clone());
@@ -448,11 +449,12 @@ impl TxTracker {
                         )?;
                     }
                     crate::TargetChainTx::AwaitingNonce(tx) => {
+                        // TODO(gas-keys): handle mirror properly.
                         let info = self
                             .nonces
                             .get_mut(&(
                                 tx.target_tx.signer_id().clone(),
-                                tx.target_tx.public_key().clone(),
+                                tx.target_tx.key().public_key().clone(),
                             ))
                             .unwrap();
                         info.txs_awaiting_nonce.insert(tx_ref.clone());
@@ -883,9 +885,10 @@ impl TxTracker {
                 "successfully sent transaction"
             );
         }
+        // TODO(gas-keys): handle mirror properly.
         let access_key = (
             tx.target_tx.transaction.signer_id().clone(),
-            tx.target_tx.transaction.public_key().clone(),
+            tx.target_tx.transaction.key().public_key().clone(),
         );
         let source_height = tx_ref.as_ref().map(|t| t.source_height);
         // TODO: don't keep adding txs if we're not ever finding them on chain, since we'll OOM eventually
@@ -954,17 +957,19 @@ impl TxTracker {
 
         crate::put_pending_outcome(db, hash, tx.nonce_updates)?;
 
+        // TODO(gas-keys): handle mirror properly.
         let mut t = crate::read_target_nonce(
             db,
             tx.target_tx.transaction.signer_id(),
-            tx.target_tx.transaction.public_key(),
+            tx.target_tx.transaction.key().public_key(),
         )?
         .unwrap();
         t.nonce = std::cmp::max(t.nonce, Some(tx.target_tx.transaction.nonce()));
+        // TODO(gas-keys): handle mirror properly.
         crate::put_target_nonce(
             db,
             tx.target_tx.transaction.signer_id(),
-            tx.target_tx.transaction.public_key(),
+            tx.target_tx.transaction.key().public_key(),
             &t,
         )?;
         let info = self.nonces.get_mut(&access_key).unwrap();
@@ -1086,7 +1091,8 @@ impl TxTracker {
                 }
             }
         }
-        let access_key = (tx.signer_id().clone(), tx.public_key().clone());
+        // TODO(gas-keys): handle mirror properly.
+        let access_key = (tx.signer_id().clone(), tx.key().public_key().clone());
         let info = self.nonces.get_mut(&access_key).unwrap();
         if info.last_height <= Some(tx_ref.source_height) {
             access_keys_to_remove.insert(access_key);
@@ -1114,10 +1120,11 @@ impl TxTracker {
                 for (tx_ref, tx) in &b.txs {
                     match tx {
                         TargetChainTx::AwaitingNonce(t) => {
+                            // TODO(gas-keys): handle mirror properly.
                             self.nonces
                                 .get_mut(&(
                                     t.target_tx.signer_id().clone(),
-                                    t.target_tx.public_key().clone(),
+                                    t.target_tx.key().public_key().clone(),
                                 ))
                                 .unwrap()
                                 .txs_awaiting_nonce

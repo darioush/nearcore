@@ -1662,7 +1662,7 @@ impl Runtime {
                             }
 
                             let signer_id = tx.transaction.signer_id();
-                            let pubkey = tx.transaction.public_key();
+                            let pubkey = tx.transaction.key_public_key();
                             accounts.entry(signer_id).or_insert_with(|| {
                                 get_account(&processing_state.state_update, signer_id)
                             });
@@ -1690,7 +1690,7 @@ impl Runtime {
                 continue;
             }
             let signer_id = tx.transaction.signer_id();
-            let pubkey = tx.transaction.public_key();
+            let pubkey = tx.transaction.key_public_key();
             let gas_price = processing_state.apply_state.gas_price;
             let tx_hash = tx.hash();
             let block_height = processing_state.apply_state.block_height;
@@ -2439,7 +2439,7 @@ fn get_batchable_signature_and_public_key(
     signed_tx: &SignedTransaction,
 ) -> Option<(&ed25519_dalek::Signature, ed25519_dalek::VerifyingKey)> {
     let (Signature::ED25519(sig), PublicKey::ED25519(key)) =
-        (&signed_tx.signature, signed_tx.transaction.public_key())
+        (&signed_tx.signature, signed_tx.transaction.key_public_key())
     else {
         return None;
     };

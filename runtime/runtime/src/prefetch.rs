@@ -202,7 +202,7 @@ impl TriePrefetcher {
 
                 let trie_key = TrieKey::AccessKey {
                     account_id: t.transaction.signer_id().clone(),
-                    public_key: t.transaction.public_key().clone(),
+                    public_key: t.transaction.key().public_key().clone(),
                 };
                 self.prefetch_trie_key(trie_key)?;
             }
