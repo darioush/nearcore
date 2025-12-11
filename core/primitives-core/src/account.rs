@@ -516,6 +516,30 @@ impl AccessKey {
     pub fn nonce_mut(&mut self) -> &mut Nonce {
         &mut self.nonce
     }
+
+    pub fn is_gas_key(&self) -> bool {
+        match self.permission {
+            AccessKeyPermission::GasKeyFunctionCall(_, _)
+            | AccessKeyPermission::GasKeyFullAccess(_) => true,
+            AccessKeyPermission::FunctionCall(_) | AccessKeyPermission::FullAccess => false,
+        }
+    }
+
+    pub fn gas_key_data(&self) -> Option<&GasKeyData> {
+        match &self.permission {
+            AccessKeyPermission::GasKeyFunctionCall(data, _)
+            | AccessKeyPermission::GasKeyFullAccess(data) => Some(data),
+            AccessKeyPermission::FunctionCall(_) | AccessKeyPermission::FullAccess => None,
+        }
+    }
+
+    pub fn gas_key_data_mut(&mut self) -> Option<&mut GasKeyData> {
+        match &mut self.permission {
+            AccessKeyPermission::GasKeyFunctionCall(data, _)
+            | AccessKeyPermission::GasKeyFullAccess(data) => Some(data),
+            AccessKeyPermission::FunctionCall(_) | AccessKeyPermission::FullAccess => None,
+        }
+    }
 }
 
 /// Gas key is like an access key, except it stores a balance separately, and transactions signed

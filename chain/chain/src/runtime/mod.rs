@@ -25,7 +25,7 @@ use near_primitives::receipt::Receipt;
 use near_primitives::sandbox::state_patch::SandboxStatePatch;
 use near_primitives::shard_layout::{ShardLayout, ShardUId};
 use near_primitives::state_part::{PartId, StatePart};
-use near_primitives::transaction::{SignedTransaction, ValidatedTransaction};
+use near_primitives::transaction::{SignedTransaction, TransactionKeyRef, ValidatedTransaction};
 use near_primitives::types::{
     AccountId, Balance, BlockHeight, EpochHeight, EpochId, EpochInfoProvider, Gas, MerkleHash,
     ShardId, StateRoot, StateRootNode,
@@ -42,8 +42,8 @@ use near_store::flat::FlatStorageManager;
 use near_store::trie::{FindSplitError, find_trie_split, total_mem_usage};
 use near_store::{
     ApplyStatePartResult, COLD_HEAD_KEY, DBCol, ShardTries, StateSnapshotConfig, Store, Trie,
-    TrieConfig, TrieUpdate, WrappedTrieChanges, get_access_key, get_account, set_access_key,
-    set_account,
+    TrieConfig, TrieUpdate, WrappedTrieChanges, get_access_key_and_nonce_by_tx_key, get_account,
+    set_access_key_and_nonce_changes, set_account,
 };
 use near_vm_runner::ContractCode;
 use near_vm_runner::{ContractRuntimeCache, precompile_contract};
@@ -52,7 +52,7 @@ use node_runtime::config::tx_cost;
 use node_runtime::state_viewer::{TrieViewer, ViewApplyState};
 use node_runtime::{
     ApplyState, Runtime, SignedValidPeriodTransactions, ValidatorAccountsUpdate,
-    get_signer_and_access_key, validate_transaction, verify_and_charge_tx_ephemeral,
+    get_signer_and_access_key_nonce, validate_transaction, verify_and_charge_tx_ephemeral,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -652,7 +652,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         let shard_uid = shard_layout
             .account_id_to_shard_uid(validated_tx.to_signed_tx().transaction.signer_id());
         let trie = self.tries.get_trie_for_shard(shard_uid, state_root);
-        let (mut signer, mut access_key) = get_signer_and_access_key(&trie, &validated_tx)?;
+        let (mut signer, mut access_key) = get_signer_and_access_key_nonce(&trie, &validated_tx)?;
         verify_and_charge_tx_ephemeral(
             runtime_config,
             &mut signer,
@@ -858,25 +858,27 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
 
                 let signer_id = validated_tx.signer_id();
-                let (signer, access_key) = if let Some((id, signer, key, _)) =
-                    &mut signer_access_key
-                {
-                    debug_assert_eq!(signer_id, id);
-                    (signer, key)
-                } else {
-                    let signer = get_account(&state_update, signer_id);
-                    let signer = signer.transpose().and_then(|v| v.ok());
-                    let access_key =
-                        get_access_key(&state_update, signer_id, validated_tx.key().public_key());
-                    let access_key = access_key.transpose().and_then(|v| v.ok());
-                    let inserted = signer_access_key.insert((
-                        signer_id.clone(),
-                        signer.ok_or(Error::InvalidTransactions)?,
-                        access_key.ok_or(Error::InvalidTransactions)?,
-                        validated_tx.key().public_key().clone(),
-                    ));
-                    (&mut inserted.1, &mut inserted.2)
-                };
+                let (signer, access_key) =
+                    if let Some((id, signer, key, _)) = &mut signer_access_key {
+                        debug_assert_eq!(signer_id, id);
+                        (signer, key)
+                    } else {
+                        let signer = get_account(&state_update, signer_id);
+                        let signer = signer.transpose().and_then(|v| v.ok());
+                        let access_key = get_access_key_and_nonce_by_tx_key(
+                            &state_update,
+                            signer_id,
+                            validated_tx.key(),
+                        );
+                        let access_key = access_key.transpose().and_then(|v| v.ok());
+                        let inserted = signer_access_key.insert((
+                            signer_id.clone(),
+                            signer.ok_or(Error::InvalidTransactions)?,
+                            access_key.ok_or(Error::InvalidTransactions)?,
+                            validated_tx.key().to_owned(),
+                        ));
+                        (&mut inserted.1, &mut inserted.2)
+                    };
 
                 let verify_result =
                     tx_cost(runtime_config, &validated_tx.to_tx(), prev_block.next_gas_price)
@@ -908,9 +910,14 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
             }
 
-            if let Some((signer_id, account, access_key, public_key)) = signer_access_key {
+            if let Some((signer_id, account, access_key, public_key)) = signer_access_key.as_mut() {
                 set_account(&mut state_update.trie_update, signer_id.clone(), &account);
-                set_access_key(&mut state_update.trie_update, signer_id, public_key, &access_key);
+                set_access_key_and_nonce_changes(
+                    &mut state_update.trie_update,
+                    signer_id.clone(),
+                    TransactionKeyRef::from(&*public_key),
+                    access_key,
+                );
             }
         }
 

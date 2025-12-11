@@ -17,7 +17,7 @@ use crate::verifier::{
     StorageStakingError, check_storage_stake, validate_receipt, validate_transaction_well_formed,
 };
 pub use crate::verifier::{
-    ZERO_BALANCE_ACCOUNT_STORAGE_LIMIT, get_signer_and_access_key, set_tx_state_changes,
+    ZERO_BALANCE_ACCOUNT_STORAGE_LIMIT, get_signer_and_access_key_nonce, set_tx_state_changes,
     validate_transaction, verify_and_charge_tx_ephemeral,
 };
 use ahash::RandomState as AHashRandomState;
@@ -72,10 +72,12 @@ use near_store::trie::AccessOptions;
 use near_store::trie::receipts_column_helper::DelayedReceiptQueue;
 use near_store::trie::update::TrieUpdateResult;
 use near_store::{
-    PartialStorage, StorageError, Trie, TrieAccess, TrieChanges, TrieUpdate, get, get_access_key,
-    get_account, get_postponed_receipt, get_promise_yield_receipt, get_pure, get_received_data,
-    has_received_data, remove_postponed_receipt, remove_promise_yield_receipt, set, set_access_key,
-    set_account, set_postponed_receipt, set_promise_yield_receipt, set_received_data,
+    PartialStorage, StorageError, Trie, TrieAccess, TrieChanges, TrieUpdate, get,
+    get_access_key_and_nonce_by_tx_key, get_account, get_postponed_receipt,
+    get_promise_yield_receipt, get_pure, get_received_data, has_received_data,
+    remove_postponed_receipt, remove_promise_yield_receipt, set, set_access_key,
+    set_access_key_and_nonce_changes, set_account, set_postponed_receipt,
+    set_promise_yield_receipt, set_received_data,
 };
 use near_vm_runner::ContractCode;
 use near_vm_runner::ContractRuntimeCache;
@@ -1667,7 +1669,11 @@ impl Runtime {
                                 get_account(&processing_state.state_update, signer_id)
                             });
                             access_keys.entry((signer_id, pubkey)).or_insert_with(|| {
-                                get_access_key(&processing_state.state_update, signer_id, pubkey)
+                                get_access_key_and_nonce_by_tx_key(
+                                    &processing_state.state_update,
+                                    signer_id,
+                                    tx.transaction.key(),
+                                )
                             });
                         }
                     });
@@ -1857,10 +1863,10 @@ impl Runtime {
             processing_state.outcomes.push(outcome);
             metrics::TRANSACTION_PROCESSED_SUCCESSFULLY_TOTAL.inc();
             set_account(&mut processing_state.state_update, signer_id.clone(), account);
-            set_access_key(
+            set_access_key_and_nonce_changes(
                 &mut processing_state.state_update,
                 signer_id.clone(),
-                pubkey.clone(),
+                tx.transaction.key(),
                 access_key,
             );
             processing_state

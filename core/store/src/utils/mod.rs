@@ -6,7 +6,7 @@ use crate::trie::AccessOptions;
 use crate::{DBCol, GENESIS_STATE_ROOTS_KEY, Store, StoreUpdate, TrieAccess, TrieUpdate};
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_crypto::PublicKey;
-use near_primitives::account::{AccessKey, Account, GasKey};
+use near_primitives::account::{AccessKey, Account, FunctionCallPermission, GasKey, GasKeyData};
 use near_primitives::bandwidth_scheduler::BandwidthSchedulerState;
 use near_primitives::congestion_info::CongestionInfo;
 use near_primitives::errors::StorageError;
@@ -15,6 +15,7 @@ use near_primitives::receipt::{
     BufferedReceiptIndices, DelayedReceiptIndices, PromiseYieldIndices, PromiseYieldTimeout,
     Receipt, ReceivedData, VersionedReceiptEnum,
 };
+use near_primitives::transaction::TransactionKeyRef;
 use near_primitives::trie_key::{TrieKey, trie_key_parsers};
 use near_primitives::types::{AccountId, BlockHeight, Nonce, NonceIndex, StateRoot};
 use std::io;
@@ -247,6 +248,27 @@ pub fn set_access_key(
     set(state_update, TrieKey::AccessKey { account_id, public_key }, access_key);
 }
 
+pub fn set_access_key_and_nonce_changes(
+    state_update: &mut TrieUpdate,
+    account_id: AccountId,
+    key: TransactionKeyRef,
+    access_key_nonce: &mut AccessKeyAndNonce,
+) {
+    let AccessKeyAndNonce { access_key, nonce } = access_key_nonce;
+    match key {
+        TransactionKeyRef::AccessKey { key } => {
+            assert!(!access_key.is_gas_key());
+            *access_key.nonce_mut() = *nonce;
+            set_access_key(state_update, account_id, key.clone(), access_key);
+        }
+        TransactionKeyRef::GasKey { key, nonce_index } => {
+            assert!(access_key.is_gas_key());
+            set_gas_key_nonce(state_update, account_id.clone(), key.clone(), nonce_index, *nonce);
+            set_access_key(state_update, account_id, key.clone(), access_key);
+        }
+    }
+}
+
 pub fn set_gas_key(
     state_update: &mut TrieUpdate,
     account_id: AccountId,
@@ -338,6 +360,79 @@ pub fn get_access_key_raw(
         &trie_key_parsers::parse_trie_key_access_key_from_raw_key(raw_key)
             .expect("access key in the state should be correct"),
     )
+}
+
+pub struct AccessKeyAndNonce {
+    access_key: AccessKey,
+    nonce: u64,
+}
+
+impl AccessKeyAndNonce {
+    pub fn function_call_permission(&self) -> Option<&FunctionCallPermission> {
+        self.access_key.function_call_permission()
+    }
+
+    pub fn function_call_permission_mut(&mut self) -> Option<&mut FunctionCallPermission> {
+        self.access_key.function_call_permission_mut()
+    }
+
+    pub fn nonce_mut(&mut self) -> &mut u64 {
+        &mut self.nonce
+    }
+
+    pub fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    pub fn gas_key_data(&self) -> Option<&GasKeyData> {
+        self.access_key.gas_key_data()
+    }
+
+    pub fn gas_key_data_mut(&mut self) -> Option<&mut GasKeyData> {
+        self.access_key.gas_key_data_mut()
+    }
+
+    pub fn is_gas_key(&self) -> bool {
+        self.access_key.is_gas_key()
+    }
+}
+
+pub fn get_access_key_and_nonce_by_tx_key(
+    trie: &dyn TrieAccess,
+    account_id: &AccountId,
+    key: TransactionKeyRef,
+) -> Result<Option<AccessKeyAndNonce>, StorageError> {
+    match key {
+        TransactionKeyRef::AccessKey { key } => {
+            let access_key = get_access_key(trie, account_id, key)?;
+            let Some(access_key) = access_key else {
+                return Ok(None);
+            };
+            if access_key.is_gas_key() {
+                return Ok(None); // Treat gas keys as non-existing access keys
+            }
+            Ok(Some(AccessKeyAndNonce { nonce: access_key.nonce(), access_key }))
+        }
+        TransactionKeyRef::GasKey { key, nonce_index } => {
+            let access_key = get_access_key(trie, account_id, key)?;
+            let Some(access_key) = access_key else {
+                return Ok(None);
+            };
+            let Some(gas_key_data) = access_key.gas_key_data() else {
+                return Ok(None); // Treat non-gas keys as non-existing gas keys
+            };
+            if nonce_index >= gas_key_data.num_nonces {
+                return Ok(None); // Invalid nonce index, treat as non-existing gas key
+            }
+            let nonce =
+                get_gas_key_nonce(trie, account_id, key, nonce_index)?.ok_or_else(|| {
+                    StorageError::StorageInconsistentState(
+                        "Gas key nonce expected to be present".to_string(),
+                    )
+                })?;
+            Ok(Some(AccessKeyAndNonce { access_key, nonce }))
+        }
+    }
 }
 
 /// Removes account, code and all access keys and gas keys associated to it.
