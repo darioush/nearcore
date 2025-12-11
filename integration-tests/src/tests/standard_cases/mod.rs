@@ -1142,7 +1142,7 @@ fn assert_access_key(
     let mut key = access_key.clone();
     let block = user.get_block(result.transaction_outcome.block_hash);
     if let Some(b) = block {
-        key.nonce = (b.header.height - 1) * AccessKey::ACCESS_KEY_NONCE_RANGE_MULTIPLIER;
+        *key.nonce_mut() = (b.header.height - 1) * AccessKey::ACCESS_KEY_NONCE_RANGE_MULTIPLIER;
     }
     assert_eq!(access_key_view, key.into());
 }
