@@ -174,12 +174,6 @@ impl RpcFrom<near_primitives::views::QueryResponseKind>
             near_primitives::views::QueryResponseKind::AccessKeyList(access_key_list) => {
                 Self::AccessKeyList(access_key_list)
             }
-            near_primitives::views::QueryResponseKind::GasKey(gas_key_view) => {
-                Self::GasKey(gas_key_view)
-            }
-            near_primitives::views::QueryResponseKind::GasKeyList(gas_key_list) => {
-                Self::GasKeyList(gas_key_list)
-            }
         }
     }
 }

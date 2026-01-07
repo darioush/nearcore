@@ -372,9 +372,6 @@ pub enum Action {
     DeployGlobalContract(DeployGlobalContractAction) = 9,
     UseGlobalContract(Box<UseGlobalContractAction>) = 10,
     DeterministicStateInit(Box<DeterministicStateInitAction>) = 11,
-    AddGasKey(Box<AddGasKeyAction>) = 12,
-    DeleteGasKey(Box<DeleteGasKeyAction>) = 13,
-    TransferToGasKey(Box<TransferToGasKeyAction>) = 14,
 }
 
 const _: () = assert!(
@@ -396,7 +393,6 @@ impl Action {
         match self {
             Action::FunctionCall(a) => a.deposit,
             Action::Transfer(a) => a.deposit,
-            Action::TransferToGasKey(a) => a.deposit,
             Action::DeterministicStateInit(a) => a.deposit,
             _ => Balance::ZERO,
         }
