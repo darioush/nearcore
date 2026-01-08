@@ -9,8 +9,8 @@ use crate::{
 };
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_crypto::PublicKey;
-use near_primitives_core::account::{AccessKey, AccessKeyPermission};
-use near_primitives_core::types::{AccountId, Balance, Gas, NonceIndex};
+use near_primitives_core::account::AccessKey;
+use near_primitives_core::types::{AccountId, Balance, Gas};
 use near_schema_checker_lib::ProtocolSchema;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -286,57 +286,6 @@ pub struct StakeAction {
 )]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TransferAction {
-    pub deposit: Balance,
-}
-
-#[derive(
-    BorshSerialize,
-    BorshDeserialize,
-    PartialEq,
-    Eq,
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    ProtocolSchema,
-)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct AddGasKeyAction {
-    pub public_key: PublicKey,
-    pub num_nonces: NonceIndex,
-    pub permission: AccessKeyPermission,
-}
-
-#[derive(
-    BorshSerialize,
-    BorshDeserialize,
-    PartialEq,
-    Eq,
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    ProtocolSchema,
-)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct DeleteGasKeyAction {
-    pub public_key: PublicKey,
-}
-
-#[derive(
-    BorshSerialize,
-    BorshDeserialize,
-    PartialEq,
-    Eq,
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    ProtocolSchema,
-)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct TransferToGasKeyAction {
-    pub public_key: PublicKey,
     pub deposit: Balance,
 }
 
