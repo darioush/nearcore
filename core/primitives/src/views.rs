@@ -2707,10 +2707,6 @@ pub enum StateChangeValueView {
         account_id: AccountId,
         public_key: PublicKey,
     },
-    GasKeyDeletion {
-        account_id: AccountId,
-        public_key: PublicKey,
-    },
     DataUpdate {
         account_id: AccountId,
         #[serde(rename = "key_base64")]

@@ -18742,36 +18742,6 @@
                   "account_id": {
                     "$ref": "#/components/schemas/AccountId"
                   },
-                  "public_key": {
-                    "$ref": "#/components/schemas/PublicKey"
-                  }
-                },
-                "required": [
-                  "account_id",
-                  "public_key"
-                ],
-                "type": "object"
-              },
-              "type": {
-                "enum": [
-                  "gas_key_deletion"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "change"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "change": {
-                "properties": {
-                  "account_id": {
-                    "$ref": "#/components/schemas/AccountId"
-                  },
                   "key_base64": {
                     "$ref": "#/components/schemas/StoreKey"
                   },
