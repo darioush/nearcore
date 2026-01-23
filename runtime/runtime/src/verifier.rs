@@ -19,8 +19,8 @@ use near_primitives::transaction::{
     Action, DeployContractAction, FunctionCallAction, SignedTransaction, StakeAction, Transaction,
 };
 use near_primitives::transaction::{DeleteAccountAction, ValidatedTransaction};
-use near_primitives::types::{AccountId, Balance, Gas};
-use near_primitives::types::{BlockHeight, StorageUsage};
+use near_primitives::types::{AccountId, Balance, Gas, Nonce};
+use near_primitives::types::{BlockHeight, NonceIndex, StorageUsage};
 use near_primitives::utils::derive_near_deterministic_account_id;
 use near_primitives::version::ProtocolFeature;
 use near_primitives::version::ProtocolVersion;
@@ -178,6 +178,76 @@ pub fn get_signer_and_access_key(
     Ok((signer, access_key))
 }
 
+/// Validates that the transaction nonce is valid:
+/// - Greater than current nonce (monotonically increasing)
+/// - Less than upper bound based on block height (if provided)
+fn verify_nonce(
+    tx_nonce: Nonce,
+    current_nonce: Nonce,
+    block_height: Option<BlockHeight>,
+) -> Result<(), InvalidTxError> {
+    if tx_nonce <= current_nonce {
+        return Err(InvalidTxError::InvalidNonce { tx_nonce, ak_nonce: current_nonce });
+    }
+    if let Some(height) = block_height {
+        let upper_bound =
+            height * near_primitives::account::AccessKey::ACCESS_KEY_NONCE_RANGE_MULTIPLIER;
+        if tx_nonce >= upper_bound {
+            return Err(InvalidTxError::NonceTooLarge { tx_nonce, upper_bound });
+        }
+    }
+    Ok(())
+}
+
+/// Validates FunctionCall permission constraints:
+/// - Transaction must have exactly one action
+/// - Action must be FunctionCall with zero deposit
+/// - Receiver must match permission's receiver
+/// - Method name must be in allowed list (if list is non-empty)
+fn verify_function_call_permission(
+    function_call_permission: &near_primitives::account::FunctionCallPermission,
+    tx: &Transaction,
+) -> Result<(), InvalidTxError> {
+    if tx.actions().len() != 1 {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::RequiresFullAccess,
+        ));
+    }
+    let Some(Action::FunctionCall(function_call)) = tx.actions().get(0) else {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::RequiresFullAccess,
+        ));
+    };
+    if function_call.deposit > Balance::ZERO {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::DepositWithFunctionCall,
+        ));
+    }
+    let tx_receiver = tx.receiver_id();
+    let ak_receiver = &function_call_permission.receiver_id;
+    if tx_receiver != ak_receiver {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::ReceiverMismatch {
+                tx_receiver: tx_receiver.clone(),
+                ak_receiver: ak_receiver.clone(),
+            },
+        ));
+    }
+    if !function_call_permission.method_names.is_empty()
+        && function_call_permission
+            .method_names
+            .iter()
+            .all(|method_name| &function_call.method_name != method_name)
+    {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::MethodNameMismatch {
+                method_name: function_call.method_name.clone(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Verify nonce, balance and access key for the transaction given the account state.
 ///
 /// This will only modify the `signer` and `access_key` with the new state if the function returns
@@ -193,26 +263,17 @@ pub fn verify_and_charge_tx_ephemeral(
     let TransactionCost { gas_burnt, gas_remaining, receipt_gas_price, total_cost, burnt_amount } =
         *transaction_cost;
     let signer_id = tx.signer_id();
-    // TODO(gas-keys): Currently, this function does not support gas keys.
-    // This is fine since gas keys are not enabled yet.
     let tx_nonce = tx.nonce().nonce();
-    if tx_nonce <= access_key.nonce {
-        let err = InvalidTxError::InvalidNonce { tx_nonce, ak_nonce: access_key.nonce };
-        return Err(err.into());
-    }
-    if let Some(height) = block_height {
-        let upper_bound =
-            height * near_primitives::account::AccessKey::ACCESS_KEY_NONCE_RANGE_MULTIPLIER;
-        if tx_nonce >= upper_bound {
-            return Err(InvalidTxError::NonceTooLarge { tx_nonce, upper_bound }.into());
-        }
-    }
+
+    verify_nonce(tx_nonce, access_key.nonce, block_height)?;
 
     let balance = signer.amount();
     let Some(new_amount) = balance.checked_sub(total_cost) else {
-        let signer_id = signer_id.clone();
-        let err = InvalidTxError::NotEnoughBalance { signer_id, balance, cost: total_cost };
-        return Err(err.into());
+        return Err(InvalidTxError::NotEnoughBalance {
+            signer_id: signer_id.clone(),
+            balance,
+            cost: total_cost,
+        });
     };
 
     if let AccessKeyPermission::FunctionCall(ref mut perms) = access_key.permission {
@@ -228,56 +289,106 @@ pub fn verify_and_charge_tx_ephemeral(
         }
     }
 
-    match check_storage_stake(&signer, new_amount, config) {
+    match check_storage_stake(signer, new_amount, config) {
         Ok(()) => {}
         Err(StorageStakingError::LackBalanceForStorageStaking(amount)) => {
-            let err = InvalidTxError::LackBalanceForState { signer_id: signer_id.clone(), amount };
-            return Err(err.into());
+            return Err(InvalidTxError::LackBalanceForState {
+                signer_id: signer_id.clone(),
+                amount,
+            });
         }
         Err(StorageStakingError::StorageError(err)) => {
             return Err(StorageError::StorageInconsistentState(err).into());
         }
     };
 
-    if let AccessKeyPermission::FunctionCall(ref function_call_permission) = access_key.permission {
-        if tx.actions().len() != 1 {
-            let err = InvalidAccessKeyError::RequiresFullAccess;
-            return Err(InvalidTxError::InvalidAccessKeyError(err).into());
-        }
-        if let Some(Action::FunctionCall(function_call)) = tx.actions().get(0) {
-            if function_call.deposit > Balance::ZERO {
-                let err = InvalidAccessKeyError::DepositWithFunctionCall;
-                return Err(InvalidTxError::InvalidAccessKeyError(err).into());
-            }
-            let tx_receiver = tx.receiver_id();
-            let ak_receiver = &function_call_permission.receiver_id;
-            if tx_receiver != ak_receiver {
-                let err = InvalidAccessKeyError::ReceiverMismatch {
-                    tx_receiver: tx_receiver.clone(),
-                    ak_receiver: ak_receiver.clone(),
-                };
-                return Err(InvalidTxError::InvalidAccessKeyError(err).into());
-            }
-            if !function_call_permission.method_names.is_empty()
-                && function_call_permission
-                    .method_names
-                    .iter()
-                    .all(|method_name| &function_call.method_name != method_name)
-            {
-                let err = InvalidAccessKeyError::MethodNameMismatch {
-                    method_name: function_call.method_name.clone(),
-                };
-                return Err(InvalidTxError::InvalidAccessKeyError(err).into());
-            }
-        } else {
-            let err = InvalidAccessKeyError::RequiresFullAccess;
-            return Err(InvalidTxError::InvalidAccessKeyError(err).into());
-        }
-    };
+    if let Some(function_call_permission) = access_key.permission.function_call_permission() {
+        verify_function_call_permission(function_call_permission, tx)?;
+    }
 
     access_key.nonce = tx_nonce;
     signer.set_amount(new_amount);
     Ok(VerificationResult { gas_burnt, gas_remaining, receipt_gas_price, burnt_amount })
+}
+
+/// Verify nonce, balance and access key for a gas key transaction.
+///
+/// Similar to `verify_and_charge_tx_ephemeral` but for gas key transactions where:
+/// - The nonce is stored separately from the AccessKey (passed as `current_nonce`)
+/// - The AccessKey is only used for permission checks (immutable)
+///
+/// Returns the new nonce value that should be persisted via `set_gas_key_nonce`.
+///
+/// Note: Currently charges account balance. TODO: charge gas key balance instead.
+pub fn verify_and_charge_gas_key_tx_ephemeral(
+    config: &RuntimeConfig,
+    account: &mut Account,
+    access_key: &AccessKey,
+    current_nonce: Nonce,
+    nonce_index: NonceIndex,
+    tx: &Transaction,
+    transaction_cost: &TransactionCost,
+    block_height: Option<BlockHeight>,
+) -> Result<(VerificationResult, Nonce), InvalidTxError> {
+    let TransactionCost { gas_burnt, gas_remaining, receipt_gas_price, total_cost, burnt_amount } =
+        *transaction_cost;
+    let signer_id = tx.signer_id();
+
+    // Validate this is actually a gas key
+    let Some(gas_key_info) = access_key.gas_key_info() else {
+        return Err(InvalidTxError::InvalidAccessKeyError(
+            InvalidAccessKeyError::AccessKeyNotFound {
+                account_id: signer_id.clone(),
+                public_key: tx.public_key().clone().into(),
+            },
+        ));
+    };
+
+    // Validate nonce_index is within bounds
+    if nonce_index >= gas_key_info.num_nonces {
+        return Err(InvalidTxError::InvalidNonce {
+            tx_nonce: tx.nonce().nonce(),
+            ak_nonce: current_nonce,
+        });
+    }
+
+    let tx_nonce = tx.nonce().nonce();
+    verify_nonce(tx_nonce, current_nonce, block_height)?;
+
+    // TODO(gas-keys): Charge gas key balance instead of account balance for gas.
+    // For now, we charge the account balance to keep the implementation simpler.
+    let balance = account.amount();
+    let Some(new_amount) = balance.checked_sub(total_cost) else {
+        return Err(InvalidTxError::NotEnoughBalance {
+            signer_id: signer_id.clone(),
+            balance,
+            cost: total_cost,
+        });
+    };
+
+    match check_storage_stake(account, new_amount, config) {
+        Ok(()) => {}
+        Err(StorageStakingError::LackBalanceForStorageStaking(amount)) => {
+            return Err(InvalidTxError::LackBalanceForState {
+                signer_id: signer_id.clone(),
+                amount,
+            });
+        }
+        Err(StorageStakingError::StorageError(err)) => {
+            return Err(StorageError::StorageInconsistentState(err).into());
+        }
+    };
+
+    if let Some(function_call_permission) = access_key.permission.function_call_permission() {
+        verify_function_call_permission(function_call_permission, tx)?;
+    }
+
+    account.set_amount(new_amount);
+    let new_nonce = tx_nonce;
+    Ok((
+        VerificationResult { gas_burnt, gas_remaining, receipt_gas_price, burnt_amount },
+        new_nonce,
+    ))
 }
 
 /// Validates a given receipt. Checks validity of the Action or Data receipt.
