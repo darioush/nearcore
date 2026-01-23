@@ -9,6 +9,7 @@ use crate::config::{
     total_prepaid_exec_fees, total_prepaid_gas,
 };
 use crate::congestion_control::DelayedReceiptQueueWrapper;
+pub use crate::key_state::KeyState;
 use crate::metrics::{
     TRANSACTION_BATCH_SIGNATURE_VERIFY_FAILURE_TOTAL,
     TRANSACTION_BATCH_SIGNATURE_VERIFY_SUCCESS_TOTAL,
@@ -20,7 +21,7 @@ use crate::verifier::{
 };
 pub use crate::verifier::{
     ZERO_BALANCE_ACCOUNT_STORAGE_LIMIT, get_signer_and_access_key, set_tx_state_changes,
-    validate_transaction, verify_and_charge_gas_key_tx_ephemeral, verify_and_charge_tx_ephemeral,
+    validate_transaction, verify_and_charge_tx_ephemeral,
 };
 use ahash::RandomState as AHashRandomState;
 use bandwidth_scheduler::{BandwidthSchedulerOutput, run_bandwidth_scheduler};
@@ -110,6 +111,7 @@ mod conversions;
 mod deterministic_account_id;
 pub mod ext;
 mod global_contracts;
+mod key_state;
 pub mod metrics;
 mod pipelining;
 mod prefetch;
@@ -1780,87 +1782,57 @@ impl Runtime {
                 Some(Err(e)) => return Err(e.clone().into()),
                 None => unreachable!("access keys should've been prefetched"),
             };
-            // Check if this is a gas key transaction and get the nonce info
-            let gas_key_nonce_info = tx.transaction.nonce().nonce_index().map(|nonce_index| {
+            // Create KeyState abstraction for transaction verification
+            let mut key_state = if let Some(nonce_index) = tx.transaction.nonce().nonce_index() {
+                // Gas key transaction - load nonce from prefetched cache
                 let mut nonce_entry = gas_key_nonces.get_mut(&(signer_id, pubkey, nonce_index));
                 let current_nonce = match nonce_entry.as_deref_mut() {
                     Some(Ok(Some(n))) => *n,
                     Some(Ok(None)) => {
-                        // Gas key nonce not found - this shouldn't happen for valid gas key txs
-                        return Err(InvalidTxError::InvalidNonce {
-                            tx_nonce: tx.transaction.nonce().nonce(),
-                            ak_nonce: 0,
-                        });
+                        metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
+                        tracing::debug!(%tx_hash, "gas key nonce not found");
+                        let outcome = ExecutionOutcomeWithId::failed(
+                            tx,
+                            InvalidTxError::InvalidNonce {
+                                tx_nonce: tx.transaction.nonce().nonce(),
+                                ak_nonce: 0,
+                            },
+                        );
+                        Self::register_outcome(
+                            processing_state.protocol_version,
+                            &mut processing_state.outcomes,
+                            outcome,
+                        );
+                        continue;
                     }
                     Some(Err(e)) => return Err(e.clone().into()),
                     None => unreachable!("gas key nonces should've been prefetched"),
                 };
-                Ok((nonce_index, current_nonce))
-            });
-
-            let (verification_result, new_gas_key_nonce) = if let Some(gas_key_result) =
-                gas_key_nonce_info
-            {
-                // Gas key transaction
-                let (nonce_index, current_nonce) = match gas_key_result {
-                    Ok(v) => v,
-                    Err(error) => {
-                        metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
-                        tracing::debug!(%tx_hash, error=&error as &dyn std::error::Error, "gas key nonce lookup failed");
-                        let outcome = ExecutionOutcomeWithId::failed(tx, error);
-                        Self::register_outcome(
-                            processing_state.protocol_version,
-                            &mut processing_state.outcomes,
-                            outcome,
-                        );
-                        continue;
-                    }
-                };
-                match verify_and_charge_gas_key_tx_ephemeral(
-                    &processing_state.apply_state.config,
-                    account,
-                    access_key,
-                    current_nonce,
-                    nonce_index,
-                    &tx.transaction,
-                    &cost,
-                    Some(block_height),
-                ) {
-                    Ok((v, new_nonce)) => (v, Some((nonce_index, new_nonce))),
-                    Err(error) => {
-                        metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
-                        tracing::debug!(%tx_hash, error=&error as &dyn std::error::Error, "gas key transaction failed verify/charge");
-                        let outcome = ExecutionOutcomeWithId::failed(tx, error);
-                        Self::register_outcome(
-                            processing_state.protocol_version,
-                            &mut processing_state.outcomes,
-                            outcome,
-                        );
-                        continue;
-                    }
-                }
+                KeyState::from_gas_key(access_key, nonce_index, current_nonce)
             } else {
                 // Regular access key transaction
-                match verify_and_charge_tx_ephemeral(
-                    &processing_state.apply_state.config,
-                    account,
-                    access_key,
-                    &tx.transaction,
-                    &cost,
-                    Some(block_height),
-                ) {
-                    Ok(v) => (v, None),
-                    Err(error) => {
-                        metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
-                        tracing::debug!(%tx_hash, error=&error as &dyn std::error::Error, "transaction failed verify/charge");
-                        let outcome = ExecutionOutcomeWithId::failed(tx, error);
-                        Self::register_outcome(
-                            processing_state.protocol_version,
-                            &mut processing_state.outcomes,
-                            outcome,
-                        );
-                        continue;
-                    }
+                KeyState::from_access_key(access_key)
+            };
+
+            let verification_result = match verify_and_charge_tx_ephemeral(
+                &processing_state.apply_state.config,
+                account,
+                &mut key_state,
+                &tx.transaction,
+                &cost,
+                Some(block_height),
+            ) {
+                Ok(v) => v,
+                Err(error) => {
+                    metrics::TRANSACTION_PROCESSED_FAILED_TOTAL.inc();
+                    tracing::debug!(%tx_hash, error=&error as &dyn std::error::Error, "transaction failed verify/charge");
+                    let outcome = ExecutionOutcomeWithId::failed(tx, error);
+                    Self::register_outcome(
+                        processing_state.protocol_version,
+                        &mut processing_state.outcomes,
+                        outcome,
+                    );
+                    continue;
                 }
             };
 
@@ -1935,8 +1907,8 @@ impl Runtime {
             processing_state.outcomes.push(outcome);
             metrics::TRANSACTION_PROCESSED_SUCCESSFULLY_TOTAL.inc();
             set_account(&mut processing_state.state_update, signer_id.clone(), account);
-            if let Some((nonce_index, new_nonce)) = new_gas_key_nonce {
-                // For gas key transactions, update the gas key nonce
+            // Update gas key nonce if applicable
+            if let Some((nonce_index, new_nonce)) = key_state.gas_key_nonce_update() {
                 set_gas_key_nonce(
                     &mut processing_state.state_update,
                     signer_id.clone(),
@@ -1948,15 +1920,13 @@ impl Runtime {
                 if let Some(mut entry) = gas_key_nonces.get_mut(&(signer_id, pubkey, nonce_index)) {
                     *entry = Ok(Some(new_nonce));
                 }
-            } else {
-                // For regular access key transactions, update the access key
-                set_access_key(
-                    &mut processing_state.state_update,
-                    signer_id.clone(),
-                    pubkey.clone(),
-                    access_key,
-                );
             }
+            set_access_key(
+                &mut processing_state.state_update,
+                signer_id.clone(),
+                pubkey.clone(),
+                access_key,
+            );
             processing_state
                 .state_update
                 .commit(StateChangeCause::TransactionProcessing { tx_hash: tx.get_hash() });

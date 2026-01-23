@@ -53,9 +53,8 @@ use node_runtime::adapter::ViewRuntimeAdapter;
 use node_runtime::config::tx_cost;
 use node_runtime::state_viewer::{TrieViewer, ViewApplyState};
 use node_runtime::{
-    ApplyState, Runtime, SignedValidPeriodTransactions, ValidatorAccountsUpdate,
-    get_signer_and_access_key, validate_transaction, verify_and_charge_gas_key_tx_ephemeral,
-    verify_and_charge_tx_ephemeral,
+    ApplyState, KeyState, Runtime, SignedValidPeriodTransactions, ValidatorAccountsUpdate,
+    get_signer_and_access_key, validate_transaction, verify_and_charge_tx_ephemeral,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -672,10 +671,11 @@ impl RuntimeAdapter for NightshadeRuntime {
             .account_id_to_shard_uid(validated_tx.to_signed_tx().transaction.signer_id());
         let trie = self.tries.get_trie_for_shard(shard_uid, state_root);
         let (mut signer, mut access_key) = get_signer_and_access_key(&trie, &validated_tx)?;
+        let mut key_state = KeyState::from_access_key(&mut access_key);
         verify_and_charge_tx_ephemeral(
             runtime_config,
             &mut signer,
-            &mut access_key,
+            &mut key_state,
             validated_tx.to_tx(),
             &cost,
             // here we do not know which block the transaction will be included
@@ -833,15 +833,16 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
             }
 
-            // Cache for signer account and access key, reused within the same transaction group
-            // For gas key transactions, we also cache the current nonce
-            let mut signer_access_key: Option<(
-                AccountId,
-                Account,
-                AccessKey,
-                PublicKey,
-                Option<(NonceIndex, Nonce)>, // gas key nonce info
-            )> = None;
+            // Cache for signer account and access key, reused within the same transaction group.
+            // For gas key transactions, also caches the current nonce.
+            struct SignerCache {
+                account_id: AccountId,
+                account: Account,
+                access_key: AccessKey,
+                public_key: PublicKey,
+                gas_key_nonce: Option<(NonceIndex, Nonce)>,
+            }
+            let mut signer_cache: Option<SignerCache> = None;
 
             // Take a single transaction from this transaction group
             while let Some(tx_peek) = transaction_group_iter.peek_next() {
@@ -886,14 +887,14 @@ impl RuntimeAdapter for NightshadeRuntime {
 
                 let signer_id = validated_tx.signer_id();
                 let nonce_index = validated_tx.nonce().nonce_index();
-
-                let (signer, access_key, gas_key_nonce) =
-                    if let Some((id, signer, key, _, gk_nonce)) = &mut signer_access_key {
-                        debug_assert_eq!(signer_id, id);
-                        (signer, key, gk_nonce)
-                    } else {
-                        let signer = get_account(&state_update, signer_id);
-                        let signer = signer.transpose().and_then(|v| v.ok());
+                let cache = match &mut signer_cache {
+                    Some(cache) => {
+                        debug_assert_eq!(signer_id, &cache.account_id);
+                        cache
+                    }
+                    None => {
+                        let account = get_account(&state_update, signer_id);
+                        let account = account.transpose().and_then(|v| v.ok());
                         let access_key =
                             get_access_key(&state_update, signer_id, validated_tx.public_key());
                         let access_key = access_key.transpose().and_then(|v| v.ok());
@@ -910,49 +911,47 @@ impl RuntimeAdapter for NightshadeRuntime {
                         } else {
                             None
                         };
-                        let inserted = signer_access_key.insert((
-                            signer_id.clone(),
-                            signer.ok_or(Error::InvalidTransactions)?,
-                            access_key.ok_or(Error::InvalidTransactions)?,
-                            validated_tx.public_key().clone(),
+                        signer_cache.insert(SignerCache {
+                            account_id: signer_id.clone(),
+                            account: account.ok_or(Error::InvalidTransactions)?,
+                            access_key: access_key.ok_or(Error::InvalidTransactions)?,
+                            public_key: validated_tx.public_key().clone(),
                             gas_key_nonce,
-                        ));
-                        (&mut inserted.1, &mut inserted.2, &mut inserted.4)
-                    };
+                        })
+                    }
+                };
 
-                let verify_result =
-                    tx_cost(runtime_config, &validated_tx.to_tx(), prev_block.next_gas_price)
-                        .map_err(InvalidTxError::from)
-                        .and_then(|cost| {
-                            if let Some((idx, current_nonce)) = gas_key_nonce {
-                                // Gas key transaction
-                                verify_and_charge_gas_key_tx_ephemeral(
-                                    runtime_config,
-                                    signer,
-                                    access_key,
-                                    *current_nonce,
-                                    *idx,
-                                    validated_tx.to_tx(),
-                                    &cost,
-                                    Some(next_block_height),
-                                )
-                                .map(|(v, new_nonce)| {
-                                    // Update cached nonce for subsequent transactions
-                                    *current_nonce = new_nonce;
-                                    v
-                                })
-                            } else {
-                                // Regular access key transaction
-                                verify_and_charge_tx_ephemeral(
-                                    runtime_config,
-                                    signer,
-                                    access_key,
-                                    validated_tx.to_tx(),
-                                    &cost,
-                                    Some(next_block_height),
-                                )
-                            }
-                        });
+                let cost = match tx_cost(
+                    runtime_config,
+                    &validated_tx.to_tx(),
+                    prev_block.next_gas_price,
+                ) {
+                    Ok(cost) => cost,
+                    Err(e) => {
+                        tracing::trace!(target: "runtime", tx=?validated_tx.get_hash(), ?e, "discarding transaction that failed cost computation");
+                        rejected_invalid_tx += 1;
+                        continue;
+                    }
+                };
+                let mut key_state = match cache.gas_key_nonce {
+                    Some((idx, nonce)) => KeyState::from_gas_key(&mut cache.access_key, idx, nonce),
+                    None => KeyState::from_access_key(&mut cache.access_key),
+                };
+                let verify_result = verify_and_charge_tx_ephemeral(
+                    runtime_config,
+                    &mut cache.account,
+                    &mut key_state,
+                    validated_tx.to_tx(),
+                    &cost,
+                    Some(next_block_height),
+                );
+
+                // Update cached gas key nonce for subsequent transactions
+                if let Some((_, new_nonce)) = key_state.gas_key_nonce_update() {
+                    if let Some((_, cached_nonce)) = &mut cache.gas_key_nonce {
+                        *cached_nonce = new_nonce;
+                    }
+                }
 
                 match verify_result {
                     Ok(cost) => {
@@ -970,28 +969,27 @@ impl RuntimeAdapter for NightshadeRuntime {
                 }
             }
 
-            if let Some((signer_id, account, access_key, public_key, gas_key_nonce)) =
-                signer_access_key
-            {
-                set_account(&mut state_update.trie_update, signer_id.clone(), &account);
-                if let Some((nonce_index, nonce)) = gas_key_nonce {
-                    // For gas key transactions, update the gas key nonce
+            if let Some(cache) = signer_cache {
+                set_account(
+                    &mut state_update.trie_update,
+                    cache.account_id.clone(),
+                    &cache.account,
+                );
+                if let Some((nonce_index, nonce)) = cache.gas_key_nonce {
                     set_gas_key_nonce(
                         &mut state_update.trie_update,
-                        signer_id,
-                        public_key,
+                        cache.account_id.clone(),
+                        cache.public_key.clone(),
                         nonce_index,
                         nonce,
-                    );
-                } else {
-                    // For regular access key transactions, update the access key
-                    set_access_key(
-                        &mut state_update.trie_update,
-                        signer_id,
-                        public_key,
-                        &access_key,
-                    );
-                }
+                    )
+                };
+                set_access_key(
+                    &mut state_update.trie_update,
+                    cache.account_id,
+                    cache.public_key,
+                    &cache.access_key,
+                );
             }
         }
 
