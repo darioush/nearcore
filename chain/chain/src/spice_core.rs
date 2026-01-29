@@ -487,6 +487,16 @@ pub fn record_uncertified_chunks_for_block(
         get_uncertified_chunks(chain_store_update.chain_store(), prev_hash)?;
     uncertified_chunks
         .retain(|chunk_info| !block_execution_results.contains_key(&chunk_info.chunk_id));
+
+    // Persist execution results from core statements synchronously so they are available
+    // when processing orphan blocks before the async SpiceCoreWriterActor runs.
+    let mut store_update = chain_store_update.chain_store().store_ref().store_update();
+    for (chunk_id, execution_result) in &block_execution_results {
+        let key = get_execution_results_key(&chunk_id.block_hash, chunk_id.shard_id);
+        store_update.insert_ser(DBCol::execution_results(), &key, execution_result)?;
+    }
+    chain_store_update.merge(store_update);
+
     for chunk_info in &mut uncertified_chunks {
         for account_id in &chunk_info.missing_endorsements {
             let Some(endorsement_core_statement) =
