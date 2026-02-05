@@ -33,7 +33,10 @@ use assert_matches::assert_matches;
 use near_async::time::Duration;
 use near_o11y::testonly::init_test_logger;
 use near_parameters::RuntimeConfigStore;
-use near_primitives::action::{GlobalContractDeployMode, GlobalContractIdentifier};
+use near_primitives::action::{
+    DeterministicStateInitAction, GlobalContractDeployMode, GlobalContractIdentifier,
+};
+use near_primitives::transaction::Action;
 use near_primitives::deterministic_account_id::{
     DeterministicAccountStateInit, DeterministicAccountStateInitV1,
 };
@@ -48,7 +51,7 @@ use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::Gas;
 use near_primitives::types::{AccountId, Balance};
 use near_primitives::utils::derive_near_deterministic_account_id;
-use near_primitives::version::{PROTOCOL_VERSION, ProtocolFeature};
+use near_primitives::version::{PROTOCOL_VERSION, ProtocolFeature, ProtocolVersion};
 use near_primitives::views::{AccountView, QueryRequest, QueryResponse, QueryResponseKind};
 use near_primitives::views::{FinalExecutionOutcomeView, FinalExecutionStatus};
 use near_vm_runner::ContractCode;
@@ -338,6 +341,131 @@ fn test_deterministic_state_init_named_receiver() {
             ActionsValidationError::InvalidDeterministicStateInitReceiver { .. }
         ))
     );
+
+    env.shutdown();
+}
+
+/// Test that multi-action receipts to deterministic accounts fail before
+/// the `FixDeterministicAccountIdCreation` protocol feature is enabled.
+///
+/// Before the fix, only single-action receipts (Transfer only) could create
+/// implicit/deterministic accounts.
+#[test]
+fn test_deterministic_state_init_multi_action_before_fix() {
+    // Test requires that the feature exists but we can test with an older protocol version
+    let protocol_version_before_fix =
+        ProtocolFeature::FixDeterministicAccountIdCreation.protocol_version() - 1;
+
+    // Skip if DeterministicAccountIds itself isn't enabled at the before-fix version
+    if !ProtocolFeature::DeterministicAccountIds.enabled(protocol_version_before_fix) {
+        return;
+    }
+
+    let mut env = TestEnv::setup_with_protocol_version(
+        Balance::from_near(100),
+        protocol_version_before_fix,
+    );
+    env.deploy_global_contract(GlobalContractDeployMode::AccountId);
+
+    let data = small();
+    let (state_init, det_account) = env.new_deterministic_account_with_data(data);
+
+    // Create a multi-action transaction: Transfer + DeterministicStateInit + FunctionCall
+    let balance = Balance::from_near(5);
+    let signer = create_user_test_signer(&env.user_account());
+    let actions = vec![
+        Action::Transfer(near_primitives::transaction::TransferAction { deposit: balance }),
+        Action::DeterministicStateInit(Box::new(DeterministicStateInitAction {
+            state_init,
+            deposit: Balance::ZERO,
+        })),
+        Action::FunctionCall(Box::new(near_primitives::action::FunctionCallAction {
+            method_name: "log_something".to_owned(),
+            args: vec![],
+            gas: Gas::from_teragas(50),
+            deposit: Balance::ZERO,
+        })),
+    ];
+    let tx = SignedTransaction::from_actions(
+        env.next_nonce(),
+        env.user_account(),
+        det_account.clone(),
+        &signer,
+        actions,
+        env.get_tx_block_hash(),
+    );
+
+    // Before the fix, multi-action receipts to non-existing deterministic accounts should fail
+    let outcome = env.try_execute_tx(tx).expect("should be able to send transaction");
+    assert_matches!(
+        outcome.status,
+        FinalExecutionStatus::Failure(TxExecutionError::ActionError(ActionError {
+            kind: ActionErrorKind::AccountDoesNotExist { .. },
+            index: _
+        })),
+        "multi-action receipt should fail before FixDeterministicAccountIdCreation"
+    );
+
+    env.shutdown();
+}
+
+/// Test that deterministic accounts can be created with multi-action receipts
+/// after the `FixDeterministicAccountIdCreation` protocol feature is enabled.
+///
+/// The following sequence of actions within a single receipt is valid:
+/// 1. Transfer
+/// 2. DeterministicStateInit
+/// 3. FunctionCall
+#[test]
+fn test_deterministic_state_init_multi_action_after_fix() {
+    if !ProtocolFeature::FixDeterministicAccountIdCreation.enabled(PROTOCOL_VERSION) {
+        return;
+    }
+
+    let protocol_version_with_fix =
+        ProtocolFeature::FixDeterministicAccountIdCreation.protocol_version();
+
+    let mut env =
+        TestEnv::setup_with_protocol_version(Balance::from_near(100), protocol_version_with_fix);
+    env.deploy_global_contract(GlobalContractDeployMode::AccountId);
+
+    let data = small();
+    let (state_init, det_account) = env.new_deterministic_account_with_data(data);
+
+    // Create a multi-action transaction: Transfer + DeterministicStateInit + FunctionCall
+    let balance = Balance::from_near(5);
+    let signer = create_user_test_signer(&env.user_account());
+    let actions = vec![
+        Action::Transfer(near_primitives::transaction::TransferAction { deposit: balance }),
+        Action::DeterministicStateInit(Box::new(DeterministicStateInitAction {
+            state_init,
+            deposit: Balance::ZERO,
+        })),
+        Action::FunctionCall(Box::new(near_primitives::action::FunctionCallAction {
+            method_name: "log_something".to_owned(),
+            args: vec![],
+            gas: Gas::from_teragas(50),
+            deposit: Balance::ZERO,
+        })),
+    ];
+    let tx = SignedTransaction::from_actions(
+        env.next_nonce(),
+        env.user_account(),
+        det_account.clone(),
+        &signer,
+        actions,
+        env.get_tx_block_hash(),
+    );
+
+    let outcome = env.try_execute_tx(tx).expect("should be able to send transaction");
+    outcome.assert_success();
+
+    // Verify the account was created and the function call succeeded
+    let account = env.get_account_state(det_account.clone());
+    assert!(account.amount >= balance, "account should have been funded");
+
+    // Verify we can call the contract
+    env.assert_test_contract_usable_on_account(det_account);
 
     env.shutdown();
 }
@@ -634,6 +762,13 @@ struct TestEnv {
 
 impl TestEnv {
     fn setup(initial_balance: Balance) -> Self {
+        Self::setup_with_protocol_version(initial_balance, PROTOCOL_VERSION)
+    }
+
+    fn setup_with_protocol_version(
+        initial_balance: Balance,
+        protocol_version: ProtocolVersion,
+    ) -> Self {
         init_test_logger();
 
         let [user_account, independent_account, global_contract_account] =
@@ -645,6 +780,7 @@ impl TestEnv {
         let clients = validators_spec_clients_with_rpc(&validators_spec);
 
         let genesis = TestLoopBuilder::new_genesis_builder()
+            .protocol_version(protocol_version)
             .validators_spec(validators_spec)
             .shard_layout(shard_layout)
             .add_user_accounts_simple(
