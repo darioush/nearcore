@@ -186,16 +186,55 @@ impl ChunkRequestOrchestrator {
         &self.pool.requests
     }
 
-    pub fn fetch(&mut self) -> Vec<(ChunkHash, ChunkRequestInfo)> {
-        self.pool.fetch(self.clock.now().into())
+    /// Called periodically; returns the set of requests to send now.
+    /// Advances state for each request based on elapsed time and evicts expired ones.
+    pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkRequestAction> {
+        let requests = self.pool.fetch(self.clock.now().into());
+        let mut actions = Vec::with_capacity(requests.len());
+        for (chunk_hash, chunk_request) in requests {
+            let mut state = self.advance_state(&chunk_request);
+
+            let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
+                &chunk_request.ancestor_hash,
+                &chain_header_head.last_block_hash,
+                self.epoch_manager.as_ref(),
+            )
+            .unwrap_or_else(|err| {
+                debug_assert!(false);
+                tracing::error!(target: "chunks", ?err, "error during re-requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
+                false
+            });
+
+            let old_block = chain_header_head.last_block_hash != chunk_request.prev_block_hash
+                && chain_header_head.prev_block_hash != chunk_request.prev_block_hash;
+
+            // old_block implies at least RequestingFromOthers (request_own_parts_from_others = true)
+            if old_block && state == ChunkRequestState::RequestingFromProducer {
+                state = ChunkRequestState::RequestingFromOthers;
+            }
+
+            actions.push(ChunkRequestAction::SendRequest {
+                chunk_hash,
+                height: chunk_request.height,
+                ancestor_hash: chunk_request.ancestor_hash,
+                shard_id: chunk_request.shard_id,
+                state,
+                request_from_archival: fetch_from_archival,
+            });
+        }
+        actions
     }
 
-    pub fn switch_to_full_fetch_duration(&self) -> time::Duration {
-        self.pool.switch_to_full_fetch_duration
-    }
-
-    pub fn switch_to_others_duration(&self) -> time::Duration {
-        self.pool.switch_to_others_duration
+    /// Determine the current escalation state based on elapsed time since request was added.
+    fn advance_state(&self, info: &ChunkRequestInfo) -> ChunkRequestState {
+        let elapsed = self.clock.now() - info.added;
+        if elapsed >= self.pool.switch_to_full_fetch_duration {
+            ChunkRequestState::FullFetch
+        } else if elapsed >= self.pool.switch_to_others_duration {
+            ChunkRequestState::RequestingFromOthers
+        } else {
+            ChunkRequestState::RequestingFromProducer
+        }
     }
 
     /// Record that we need this chunk. Returns the action to take now (if any).

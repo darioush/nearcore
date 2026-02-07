@@ -85,7 +85,7 @@ use crate::chunk_request_orchestrator::{
 };
 use crate::client::{ShardsManagerResponse, ShardsManagerResponseSender};
 use crate::logic::{
-    chunk_needs_to_be_fetched_from_archival, create_partial_chunk, make_outgoing_receipts_proofs,
+    create_partial_chunk, make_outgoing_receipts_proofs,
     make_partial_encoded_chunk_from_owned_parts_and_needed_receipts, need_part, need_receipt,
 };
 use crate::metrics;
@@ -658,38 +658,9 @@ impl ShardsManagerActor {
             pool_size = self.chunk_request_orchestrator.pending_count())
         .entered();
         let me = self.validator_signer.get().map(|signer| signer.validator_id().clone());
-        // Process chunk one part requests.
-        let requests = self.chunk_request_orchestrator.fetch();
-        for (chunk_hash, chunk_request) in requests {
-            let fetch_from_archival =
-                chunk_needs_to_be_fetched_from_archival(&chunk_request.ancestor_hash, &self.chain_header_head.last_block_hash,
-                self.epoch_manager.as_ref()).unwrap_or_else(|err| {
-                debug_assert!(false);
-                tracing::error!(target: "chunks", ?err, "error during re-requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
-                false
-            });
-            let old_block = self.chain_header_head.last_block_hash != chunk_request.prev_block_hash
-                && self.chain_header_head.prev_block_hash != chunk_request.prev_block_hash;
-
-            match self.request_partial_encoded_chunk(
-                chunk_request.height,
-                &chunk_request.ancestor_hash,
-                chunk_request.shard_id,
-                &chunk_hash,
-                self.clock.now() - chunk_request.added
-                    >= self.chunk_request_orchestrator.switch_to_full_fetch_duration(),
-                old_block
-                    || self.clock.now() - chunk_request.added
-                        >= self.chunk_request_orchestrator.switch_to_others_duration(),
-                fetch_from_archival,
-                me.as_ref(),
-            ) {
-                Ok(()) => {}
-                Err(err) => {
-                    debug_assert!(false);
-                    tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk");
-                }
-            }
+        let actions = self.chunk_request_orchestrator.tick(&self.chain_header_head);
+        for action in actions {
+            self.execute_request_action(action, me.as_ref());
         }
     }
 
