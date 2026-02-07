@@ -132,13 +132,13 @@ impl ChunkRequestOrchestrator {
         let mut actions = Vec::with_capacity(due_requests.len());
         for (chunk_hash, chunk_request) in due_requests {
             let mut state = Self::advance_state(current_time - chunk_request.added);
-            let (fetch_from_archival, old_block) = self.request_context(
+            let (is_old, fetch_from_archival) = self.staleness_and_archival(
                 &chunk_request.ancestor_hash,
                 &chunk_request.prev_block_hash,
                 chain_header_head,
             );
 
-            if old_block && state == ChunkRequestState::RequestingFromProducer {
+            if is_old && state == ChunkRequestState::RequestingFromProducer {
                 state = ChunkRequestState::RequestingFromOthers;
             }
 
@@ -155,9 +155,9 @@ impl ChunkRequestOrchestrator {
         actions
     }
 
-    /// Compute whether the request needs an archival node and whether the chunk's block
-    /// is old (more than one block behind the tip). Returns `(fetch_from_archival, old_block)`.
-    fn request_context(
+    /// Compute whether the chunk's block is old (more than one block behind the tip)
+    /// and whether the request needs an archival node. Returns `(is_old, fetch_from_archival)`.
+    fn staleness_and_archival(
         &self,
         ancestor_hash: &CryptoHash,
         prev_block_hash: &CryptoHash,
@@ -173,9 +173,9 @@ impl ChunkRequestOrchestrator {
             tracing::error!(target: "chunks", ?err, "cannot determine whether to request chunk from archival node, defaulting to not");
             false
         });
-        let old_block =
+        let is_old =
             tip.last_block_hash != *prev_block_hash && tip.prev_block_hash != *prev_block_hash;
-        (fetch_from_archival, old_block)
+        (is_old, fetch_from_archival)
     }
 
     /// Determine the current escalation state based on elapsed time since request was added.
@@ -251,8 +251,8 @@ impl ChunkRequestOrchestrator {
             return None;
         }
 
-        let (fetch_from_archival, old_block) =
-            self.request_context(&ancestor_hash, &prev_block_hash, chain_header_head);
+        let (is_old, fetch_from_archival) =
+            self.staleness_and_archival(&ancestor_hash, &prev_block_hash, chain_header_head);
 
         let should_wait = self
             .should_wait_for_chunk_forwarding(
@@ -267,9 +267,9 @@ impl ChunkRequestOrchestrator {
                 false
             });
 
-        let initial_state = if should_wait && !fetch_from_archival && !old_block {
+        let initial_state = if should_wait && !fetch_from_archival && !is_old {
             ChunkRequestState::WaitingForForwarding
-        } else if old_block {
+        } else if is_old {
             ChunkRequestState::RequestingFromOthers
         } else {
             ChunkRequestState::RequestingFromProducer
