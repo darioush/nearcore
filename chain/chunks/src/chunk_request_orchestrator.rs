@@ -344,44 +344,61 @@ mod tests {
     use near_primitives::types::EpochId;
     use near_store::test_utils::create_test_store;
 
-    fn test_epoch_manager() -> Arc<dyn EpochManagerAdapter> {
-        let store = create_test_store();
-        let epoch_manager = setup_epoch_manager_with_block_and_chunk_producers(
-            store,
-            vec!["test".parse().unwrap()],
-            vec![],
-            1,
-            2,
-        );
-        Arc::new(epoch_manager.into_handle())
+    struct TestFixture {
+        clock: FakeClock,
+        orchestrator: ChunkRequestOrchestrator,
+        epoch_manager: Arc<dyn EpochManagerAdapter>,
+        tip: Tip,
     }
 
-    fn default_tip() -> Tip {
-        Tip {
-            height: 0,
-            last_block_hash: CryptoHash::default(),
-            prev_block_hash: CryptoHash::default(),
-            epoch_id: EpochId::default(),
-            next_epoch_id: EpochId::default(),
-        }
-    }
-
-    fn insert_test_request(
-        orchestrator: &mut ChunkRequestOrchestrator,
-        chunk_hash: ChunkHash,
-        added: time::Instant,
-    ) {
-        orchestrator.insert(
-            chunk_hash,
-            ChunkRequestInfo {
+    impl TestFixture {
+        fn new() -> Self {
+            let clock = FakeClock::default();
+            let store = create_test_store();
+            let epoch_manager = setup_epoch_manager_with_block_and_chunk_producers(
+                store,
+                vec!["test".parse().unwrap()],
+                vec![],
+                1,
+                2,
+            );
+            let epoch_manager: Arc<dyn EpochManagerAdapter> = Arc::new(epoch_manager.into_handle());
+            let orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
+            let tip = Tip {
                 height: 0,
-                ancestor_hash: CryptoHash::default(),
+                last_block_hash: CryptoHash::default(),
                 prev_block_hash: CryptoHash::default(),
-                shard_id: ShardId::new(0),
-                added,
-                last_requested: added,
-            },
-        );
+                epoch_id: EpochId::default(),
+                next_epoch_id: EpochId::default(),
+            };
+            Self { clock, orchestrator, epoch_manager, tip }
+        }
+
+        fn insert_request(&mut self, chunk_hash: ChunkHash) {
+            let added = self.clock.now().into();
+            self.orchestrator.insert(
+                chunk_hash,
+                ChunkRequestInfo {
+                    height: 0,
+                    ancestor_hash: CryptoHash::default(),
+                    prev_block_hash: CryptoHash::default(),
+                    shard_id: ShardId::new(0),
+                    added,
+                    last_requested: added,
+                },
+            );
+        }
+
+        fn chunk_header(&self, height: BlockHeight) -> ShardChunkHeader {
+            let epoch_id = EpochId::default();
+            let shard_layout = self.epoch_manager.get_shard_layout(&epoch_id).unwrap();
+            let shard_id = shard_layout.shard_ids().next().unwrap();
+            ShardChunkHeader::V3(ShardChunkHeaderV3::new_dummy(
+                height,
+                shard_id,
+                CryptoHash::default(),
+            ))
+        }
     }
 
     #[test]
@@ -410,17 +427,10 @@ mod tests {
 
     #[test]
     fn test_tick_requesting_from_producer() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-        let tip = default_tip();
-
-        let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
-
-        // Advance past retry duration but before switch_to_others (100ms < t < 400ms).
-        clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
-        let actions = orchestrator.tick(&tip);
+        let mut t = TestFixture::new();
+        t.insert_request(ChunkHash(hash(&[1])));
+        t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
+        let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
         assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
             assert!(!force_request_full);
@@ -430,17 +440,10 @@ mod tests {
 
     #[test]
     fn test_tick_escalates_to_requesting_from_others() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-        let tip = default_tip();
-
-        let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
-
-        // Advance past switch_to_others (400ms) but before switch_to_full_fetch (3s).
-        clock.advance(CHUNK_REQUEST_SWITCH_TO_OTHERS + time::Duration::milliseconds(50));
-        let actions = orchestrator.tick(&tip);
+        let mut t = TestFixture::new();
+        t.insert_request(ChunkHash(hash(&[1])));
+        t.clock.advance(CHUNK_REQUEST_SWITCH_TO_OTHERS + time::Duration::milliseconds(50));
+        let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
         assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
             assert!(!force_request_full);
@@ -450,17 +453,10 @@ mod tests {
 
     #[test]
     fn test_tick_escalates_to_full_fetch() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-        let tip = default_tip();
-
-        let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
-
-        // Advance past switch_to_full_fetch (3s) but before max_duration (1000s).
-        clock.advance(CHUNK_REQUEST_SWITCH_TO_FULL_FETCH + time::Duration::milliseconds(50));
-        let actions = orchestrator.tick(&tip);
+        let mut t = TestFixture::new();
+        t.insert_request(ChunkHash(hash(&[1])));
+        t.clock.advance(CHUNK_REQUEST_SWITCH_TO_FULL_FETCH + time::Duration::milliseconds(50));
+        let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
         assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
             assert!(force_request_full);
@@ -470,73 +466,46 @@ mod tests {
 
     #[test]
     fn test_tick_evicts_after_max_duration() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-        let tip = default_tip();
-
+        let mut t = TestFixture::new();
         let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
-
-        // Advance past max_duration (1000s). Request should be evicted, not returned.
-        clock.advance(CHUNK_REQUEST_RETRY_MAX + time::Duration::seconds(1));
-        let actions = orchestrator.tick(&tip);
+        t.insert_request(chunk_hash.clone());
+        t.clock.advance(CHUNK_REQUEST_RETRY_MAX + time::Duration::seconds(1));
+        let actions = t.orchestrator.tick(&t.tip);
         assert!(actions.is_empty());
-        assert!(!orchestrator.contains(&chunk_hash));
+        assert!(!t.orchestrator.contains(&chunk_hash));
     }
 
     #[test]
     fn test_tick_respects_retry_interval() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-        let tip = default_tip();
+        let mut t = TestFixture::new();
+        t.insert_request(ChunkHash(hash(&[1])));
 
-        let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
+        t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(1));
+        assert_eq!(t.orchestrator.tick(&t.tip).len(), 1);
 
-        // First tick after retry interval: should return the request.
-        clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(1));
-        let actions = orchestrator.tick(&tip);
-        assert_eq!(actions.len(), 1);
+        assert!(t.orchestrator.tick(&t.tip).is_empty());
 
-        // Immediately tick again: should NOT return the request (retry interval not elapsed).
-        let actions = orchestrator.tick(&tip);
-        assert!(actions.is_empty());
-
-        // Advance past another retry interval: should return again.
-        clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(1));
-        let actions = orchestrator.tick(&tip);
-        assert_eq!(actions.len(), 1);
+        t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(1));
+        assert_eq!(t.orchestrator.tick(&t.tip).len(), 1);
     }
 
     #[test]
     fn test_tick_old_block_promotes_to_requesting_from_others() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-
-        // Insert a request whose prev_block_hash does NOT match the tip.
-        let chunk_hash = ChunkHash(hash(&[1]));
-        let now = clock.now().into();
-        orchestrator.insert(
-            chunk_hash.clone(),
+        let mut t = TestFixture::new();
+        let now = t.clock.now().into();
+        t.orchestrator.insert(
+            ChunkHash(hash(&[1])),
             ChunkRequestInfo {
                 height: 0,
                 ancestor_hash: CryptoHash::default(),
-                prev_block_hash: hash(&[99]), // Different from tip
+                prev_block_hash: hash(&[99]),
                 shard_id: ShardId::new(0),
                 added: now,
                 last_requested: now,
             },
         );
-
-        // Advance past retry but before switch_to_others. Without old_block, this would
-        // be RequestingFromProducer.
-        clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
-
-        let tip = default_tip();
-        let actions = orchestrator.tick(&tip);
+        t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
+        let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
         assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
             assert!(!force_request_full);
@@ -544,97 +513,66 @@ mod tests {
         });
     }
 
-    fn test_chunk_header(
-        epoch_manager: &dyn EpochManagerAdapter,
-        height: BlockHeight,
-    ) -> ShardChunkHeader {
-        let epoch_id = EpochId::default();
-        let shard_layout = epoch_manager.get_shard_layout(&epoch_id).unwrap();
-        let shard_id = shard_layout.shard_ids().next().unwrap();
-        ShardChunkHeader::V3(ShardChunkHeaderV3::new_dummy(height, shard_id, CryptoHash::default()))
-    }
-
     #[test]
     fn test_track_needed_chunk_non_validator_skips_forwarding_wait() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
-        let tip = default_tip();
-
-        let chunk_header = test_chunk_header(epoch_manager.as_ref(), 3);
+        let mut t = TestFixture::new();
+        let chunk_header = t.chunk_header(3);
         let chunk_hash = chunk_header.chunk_hash();
 
-        // me=None: not a validator, should NOT wait for forwarding.
-        let action = orchestrator.track_needed_chunk(
+        let action = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
-            |_| Some(false), // in cache but not complete
-            &tip,
-            None, // not a validator
+            |_| Some(false),
+            &t.tip,
+            None,
         );
-
-        // Should immediately send request (RequestingFromProducer).
         assert_matches!(action, ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
             assert!(!force_request_full);
             assert!(!request_own_parts_from_others);
         });
-        assert!(orchestrator.contains(&chunk_hash));
+        assert!(t.orchestrator.contains(&chunk_hash));
     }
 
     #[test]
     fn test_track_needed_chunk_validator_waits_for_forwarding() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
-        let tip = default_tip();
-
-        let chunk_header = test_chunk_header(epoch_manager.as_ref(), 3);
+        let mut t = TestFixture::new();
+        let chunk_header = t.chunk_header(3);
         let chunk_hash = chunk_header.chunk_hash();
         let me: AccountId = "test".parse().unwrap();
 
-        // me=Some("test"): a block producer, should wait for forwarding.
-        let action = orchestrator.track_needed_chunk(
+        let action = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
             |_| Some(false),
-            &tip,
+            &t.tip,
             Some(&me),
         );
-
-        // Should NOT send request yet (WaitingForForwarding → None).
         assert_matches!(action, ChunkRequestAction::None);
-        // But should be tracked in the pool.
-        assert!(orchestrator.contains(&chunk_hash));
+        assert!(t.orchestrator.contains(&chunk_hash));
     }
 
     #[test]
     fn test_track_needed_chunk_duplicate_returns_none() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
-        let tip = default_tip();
+        let mut t = TestFixture::new();
+        let chunk_header = t.chunk_header(3);
 
-        let chunk_header = test_chunk_header(epoch_manager.as_ref(), 3);
-
-        // First call: inserts.
-        let _action = orchestrator.track_needed_chunk(
+        t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
             |_| Some(false),
-            &tip,
+            &t.tip,
             None,
         );
 
-        // Second call with same chunk: should return None (already tracked).
-        let action = orchestrator.track_needed_chunk(
+        let action = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
             |_| Some(false),
-            &tip,
+            &t.tip,
             None,
         );
         assert_matches!(action, ChunkRequestAction::None);
@@ -642,61 +580,48 @@ mod tests {
 
     #[test]
     fn test_track_needed_chunk_complete_returns_none() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
-        let tip = default_tip();
+        let mut t = TestFixture::new();
+        let chunk_header = t.chunk_header(3);
 
-        let chunk_header = test_chunk_header(epoch_manager.as_ref(), 3);
-
-        // Chunk is already complete: should return None and not add to pool.
-        let action = orchestrator.track_needed_chunk(
+        let action = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
-            |_| Some(true), // complete
-            &tip,
+            |_| Some(true),
+            &t.tip,
             None,
         );
         assert_matches!(action, ChunkRequestAction::None);
-        assert!(!orchestrator.contains(&chunk_header.chunk_hash()));
+        assert!(!t.orchestrator.contains(&chunk_header.chunk_hash()));
     }
 
     #[test]
     fn test_track_needed_chunk_mark_only() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager.clone());
-        let tip = default_tip();
+        let mut t = TestFixture::new();
+        let chunk_header = t.chunk_header(3);
 
-        let chunk_header = test_chunk_header(epoch_manager.as_ref(), 3);
-
-        // mark_only=true: should add to pool but return None.
-        let action = orchestrator.track_needed_chunk(
+        let action = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
-            true, // mark_only
+            true,
             |_| Some(false),
-            &tip,
+            &t.tip,
             None,
         );
         assert_matches!(action, ChunkRequestAction::None);
-        assert!(orchestrator.contains(&chunk_header.chunk_hash()));
+        assert!(t.orchestrator.contains(&chunk_header.chunk_hash()));
     }
 
     #[test]
     fn test_remove_stops_tracking() {
-        let clock = FakeClock::default();
-        let epoch_manager = test_epoch_manager();
-        let mut orchestrator = ChunkRequestOrchestrator::new(clock.clock(), epoch_manager);
-
+        let mut t = TestFixture::new();
         let chunk_hash = ChunkHash(hash(&[1]));
-        insert_test_request(&mut orchestrator, chunk_hash.clone(), clock.now().into());
-        assert!(orchestrator.contains(&chunk_hash));
-        assert_eq!(orchestrator.pending_count(), 1);
+        t.insert_request(chunk_hash.clone());
+        assert!(t.orchestrator.contains(&chunk_hash));
+        assert_eq!(t.orchestrator.pending_count(), 1);
 
-        orchestrator.remove(&chunk_hash);
-        assert!(!orchestrator.contains(&chunk_hash));
-        assert_eq!(orchestrator.pending_count(), 0);
+        t.orchestrator.remove(&chunk_hash);
+        assert!(!t.orchestrator.contains(&chunk_hash));
+        assert_eq!(t.orchestrator.pending_count(), 0);
     }
 }
