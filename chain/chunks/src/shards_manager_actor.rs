@@ -80,6 +80,9 @@
 
 use crate::adapter::ShardsManagerRequestFromClient;
 use crate::chunk_cache::{EncodedChunksCache, EncodedChunksCacheEntry};
+use crate::chunk_request_orchestrator::{
+    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestInfo, ChunkRequestOrchestrator,
+};
 use crate::client::{ShardsManagerResponse, ShardsManagerResponseSender};
 use crate::logic::{
     chunk_needs_to_be_fetched_from_archival, create_partial_chunk, make_outgoing_receipts_proofs,
@@ -112,7 +115,6 @@ use near_network::types::{
 use near_network::types::{NetworkRequests, PeerManagerMessageRequest};
 use near_o11y::span_wrapped_msg::SpanWrappedMessageExt;
 use near_primitives::block::Tip;
-use near_primitives::errors::EpochError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{MerklePath, verify_path_with_index};
 use near_primitives::receipt::Receipt;
@@ -139,13 +141,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::{debug_span, instrument};
 
-pub const CHUNK_REQUEST_RETRY: time::Duration = time::Duration::milliseconds(100);
-pub const CHUNK_REQUEST_SWITCH_TO_OTHERS: time::Duration = time::Duration::milliseconds(400);
-pub const CHUNK_REQUEST_SWITCH_TO_FULL_FETCH: time::Duration = time::Duration::seconds(3);
-const CHUNK_REQUEST_RETRY_MAX: time::Duration = time::Duration::seconds(1000);
+// Re-export public constants from chunk_request_orchestrator for backward compatibility.
+pub use crate::chunk_request_orchestrator::CHUNK_REQUEST_RETRY;
+pub use crate::chunk_request_orchestrator::CHUNK_REQUEST_SWITCH_TO_FULL_FETCH;
+pub use crate::chunk_request_orchestrator::CHUNK_REQUEST_SWITCH_TO_OTHERS;
+
 const CHUNK_FORWARD_CACHE_SIZE: usize = 1000;
-// Only request chunks from peers whose latest height >= chunk_height - CHUNK_REQUEST_PEER_HORIZON
-const CHUNK_REQUEST_PEER_HORIZON: BlockHeightDelta = 5;
 
 #[derive(PartialEq, Eq)]
 pub enum ChunkStatus {
@@ -173,89 +174,12 @@ pub enum ProcessPartialEncodedChunkResult {
     /// The chunk has been dropped without processing any part of it.
     OutsideHorizon,
 }
-
-#[derive(Clone, Debug)]
-pub(crate) struct ChunkRequestInfo {
-    height: BlockHeight,
-    // hash of the ancestor hash used for the request, i.e., the first block up the
-    // parent chain of the block that has missing chunks that is approved
-    ancestor_hash: CryptoHash,
-    // previous block hash of the chunk
-    prev_block_hash: CryptoHash,
-    shard_id: ShardId,
-    added: time::Instant,
-    last_requested: time::Instant,
-}
-
 #[derive(Debug)]
 pub enum HandleNetworkRequestResult {
     Ok,
     /// request failed and could be retried after some duration
     RetryProcessing(Box<ShardsManagerRequestFromNetwork>, Duration),
     Err,
-}
-
-struct RequestPool {
-    retry_duration: time::Duration,
-    switch_to_others_duration: time::Duration,
-    switch_to_full_fetch_duration: time::Duration,
-    max_duration: time::Duration,
-    requests: HashMap<ChunkHash, ChunkRequestInfo>,
-}
-
-impl RequestPool {
-    pub fn new(
-        retry_duration: time::Duration,
-        switch_to_others_duration: time::Duration,
-        switch_to_full_fetch_duration: time::Duration,
-        max_duration: time::Duration,
-    ) -> Self {
-        Self {
-            retry_duration,
-            switch_to_others_duration,
-            switch_to_full_fetch_duration,
-            max_duration,
-            requests: HashMap::default(),
-        }
-    }
-    pub fn contains_key(&self, chunk_hash: &ChunkHash) -> bool {
-        self.requests.contains_key(chunk_hash)
-    }
-    pub fn len(&self) -> usize {
-        self.requests.len()
-    }
-
-    pub fn insert(&mut self, chunk_hash: ChunkHash, chunk_request: ChunkRequestInfo) {
-        self.requests.insert(chunk_hash, chunk_request);
-    }
-
-    pub fn get_request_info(&self, chunk_hash: &ChunkHash) -> Option<&ChunkRequestInfo> {
-        self.requests.get(chunk_hash)
-    }
-
-    pub fn remove(&mut self, chunk_hash: &ChunkHash) {
-        self.requests.remove(chunk_hash);
-    }
-
-    pub fn fetch(&mut self, current_time: time::Instant) -> Vec<(ChunkHash, ChunkRequestInfo)> {
-        let mut removed_requests = HashSet::<ChunkHash>::default();
-        let mut requests = Vec::new();
-        for (chunk_hash, chunk_request) in &mut self.requests {
-            if current_time - chunk_request.added >= self.max_duration {
-                tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
-                removed_requests.insert(chunk_hash.clone());
-                continue;
-            }
-            if current_time - chunk_request.last_requested >= self.retry_duration {
-                chunk_request.last_requested = current_time;
-                requests.push((chunk_hash.clone(), chunk_request.clone()));
-            }
-        }
-        for chunk_hash in removed_requests {
-            self.requests.remove(&chunk_hash);
-        }
-        requests
-    }
 }
 
 pub struct ShardsManagerActor {
@@ -279,7 +203,7 @@ pub struct ShardsManagerActor {
     rs: ReedSolomon,
 
     encoded_chunks: EncodedChunksCache,
-    requested_partial_encoded_chunks: RequestPool,
+    chunk_request_orchestrator: ChunkRequestOrchestrator,
     chunk_forwards_cache: lru::LruCache<ChunkHash, HashMap<u64, PartialEncodedChunkPart>>,
 
     // This is a best-effort cache of the chain's head, not the source of truth. The source
@@ -381,6 +305,8 @@ impl ShardsManagerActor {
         chunk_request_retry_period: Duration,
         chunks_cache_height_horizon: BlockHeightDelta,
     ) -> Self {
+        let chunk_request_orchestrator =
+            ChunkRequestOrchestrator::new(clock.clone(), epoch_manager.clone());
         Self {
             clock,
             validator_signer,
@@ -396,12 +322,7 @@ impl ShardsManagerActor {
             )
             .unwrap(),
             encoded_chunks: EncodedChunksCache::new(chunks_cache_height_horizon),
-            requested_partial_encoded_chunks: RequestPool::new(
-                CHUNK_REQUEST_RETRY,
-                CHUNK_REQUEST_SWITCH_TO_OTHERS,
-                CHUNK_REQUEST_SWITCH_TO_FULL_FETCH,
-                CHUNK_REQUEST_RETRY_MAX,
-            ),
+            chunk_request_orchestrator,
             chunk_forwards_cache: lru::LruCache::new(
                 NonZeroUsize::new(CHUNK_FORWARD_CACHE_SIZE).unwrap(),
             ),
@@ -426,10 +347,8 @@ impl ShardsManagerActor {
     }
 
     fn update_chain_heads(&mut self, head: Tip, header_head: Tip) {
-        self.encoded_chunks.update_largest_seen_height(
-            head.height,
-            &self.requested_partial_encoded_chunks.requests,
-        );
+        self.encoded_chunks
+            .update_largest_seen_height(head.height, self.chunk_request_orchestrator.requests());
         self.chain_head = head;
         self.chain_header_head = header_head;
     }
@@ -628,44 +547,6 @@ impl ShardsManagerActor {
             .collect::<HashSet<_>>()
     }
 
-    /// Check whether the node should wait for chunk parts being forwarded to it
-    /// The node will wait if it's a block producer or a chunk producer that is responsible
-    /// for producing the next chunk in this shard.
-    /// `prev_hash`: previous block hash of the chunk that we are requesting
-    /// `next_chunk_height`: height of the next chunk of the chunk that we are requesting
-    fn should_wait_for_chunk_forwarding(
-        &self,
-        prev_hash: &CryptoHash,
-        shard_id: ShardId,
-        next_chunk_height: BlockHeight,
-        me: Option<&AccountId>,
-    ) -> Result<bool, EpochError> {
-        // chunks will not be forwarded to non-validators
-        let me = match me {
-            None => return Ok(false),
-            Some(it) => it,
-        };
-        let epoch_id = self.epoch_manager.get_epoch_id_from_prev_block(prev_hash)?;
-        let block_producers = self.epoch_manager.get_epoch_block_producers_ordered(&epoch_id)?;
-        for bp in block_producers {
-            if bp.account_id() == me {
-                return Ok(true);
-            }
-        }
-        let chunk_producer = self
-            .epoch_manager
-            .get_chunk_producer_info(&ChunkProductionKey {
-                epoch_id,
-                height_created: next_chunk_height,
-                shard_id,
-            })?
-            .take_account_id();
-        if &chunk_producer == me {
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
     /// Only marks this chunk as being requested
     /// Note no requests are actually sent at this point.
     fn request_chunk_single_mark_only(
@@ -702,7 +583,7 @@ impl ShardsManagerActor {
             height_created = height)
         .entered();
 
-        if self.requested_partial_encoded_chunks.contains_key(&chunk_hash) {
+        if self.chunk_request_orchestrator.contains(&chunk_hash) {
             tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already being requested");
             return;
         }
@@ -722,7 +603,7 @@ impl ShardsManagerActor {
         }
 
         let prev_block_hash = *chunk_header.prev_block_hash();
-        self.requested_partial_encoded_chunks.insert(
+        self.chunk_request_orchestrator.insert(
             chunk_hash.clone(),
             ChunkRequestInfo {
                 height,
@@ -749,7 +630,7 @@ impl ShardsManagerActor {
             && self.chain_header_head.prev_block_hash != prev_block_hash;
 
         let should_wait_for_chunk_forwarding =
-                self.should_wait_for_chunk_forwarding(&ancestor_hash, chunk_header.shard_id(), chunk_header.height_created()+1, me).unwrap_or_else(|_| {
+                self.chunk_request_orchestrator.should_wait_for_chunk_forwarding(&ancestor_hash, chunk_header.shard_id(), chunk_header.height_created()+1, me).unwrap_or_else(|_| {
                     // ancestor_hash must be accepted because we don't request missing chunks through this
                     // this function for orphans
                     debug_assert!(false, "{:?} must be accepted", ancestor_hash);
@@ -842,11 +723,11 @@ impl ShardsManagerActor {
             target: "client",
             "resend_chunk_requests",
             header_head_height = self.chain_header_head.height,
-            pool_size = self.requested_partial_encoded_chunks.len())
+            pool_size = self.chunk_request_orchestrator.pending_count())
         .entered();
         let me = self.validator_signer.get().map(|signer| signer.validator_id().clone());
         // Process chunk one part requests.
-        let requests = self.requested_partial_encoded_chunks.fetch(self.clock.now().into());
+        let requests = self.chunk_request_orchestrator.fetch();
         for (chunk_hash, chunk_request) in requests {
             let fetch_from_archival =
                 chunk_needs_to_be_fetched_from_archival(&chunk_request.ancestor_hash, &self.chain_header_head.last_block_hash,
@@ -864,10 +745,10 @@ impl ShardsManagerActor {
                 chunk_request.shard_id,
                 &chunk_hash,
                 self.clock.now() - chunk_request.added
-                    >= self.requested_partial_encoded_chunks.switch_to_full_fetch_duration,
+                    >= self.chunk_request_orchestrator.switch_to_full_fetch_duration(),
                 old_block
                     || self.clock.now() - chunk_request.added
-                        >= self.requested_partial_encoded_chunks.switch_to_others_duration,
+                        >= self.chunk_request_orchestrator.switch_to_others_duration(),
                 fetch_from_archival,
                 me.as_ref(),
             ) {
@@ -1207,7 +1088,7 @@ impl ShardsManagerActor {
     ) -> Result<Option<(ShardChunk, PartialEncodedChunk)>, Error> {
         match self.check_chunk_complete(&mut encoded_chunk) {
             ChunkStatus::Complete(merkle_paths) => {
-                self.requested_partial_encoded_chunks.remove(&encoded_chunk.chunk_hash());
+                self.chunk_request_orchestrator.remove(&encoded_chunk.chunk_hash());
                 let chunk = ShardChunkWithEncoding::from_encoded_shard_chunk(encoded_chunk)?;
                 if !validate_chunk_proofs(chunk.to_shard_chunk(), self.epoch_manager.as_ref())? {
                     return Err(Error::InvalidChunk);
@@ -1406,7 +1287,7 @@ impl ShardsManagerActor {
             if let Ok(epoch_id) = epoch_id {
                 (epoch_id, true)
             } else if let Some(request_info) =
-                self.requested_partial_encoded_chunks.get_request_info(&chunk_hash)
+                self.chunk_request_orchestrator.get_request_info(&chunk_hash)
             {
                 let ancestor_hash = request_info.ancestor_hash;
                 let epoch_id = self.epoch_manager.get_epoch_id_from_prev_block(&ancestor_hash)?;
@@ -1555,7 +1436,7 @@ impl ShardsManagerActor {
         }
 
         // 1.b Checking chunk height
-        let chunk_requested = self.requested_partial_encoded_chunks.contains_key(&chunk_hash);
+        let chunk_requested = self.chunk_request_orchestrator.contains(&chunk_hash);
         if !chunk_requested {
             if !self
                 .encoded_chunks
@@ -1761,7 +1642,7 @@ impl ShardsManagerActor {
                                 // remove this entry from the cache and remove the request from the request pool
                                 tracing::debug!(target: "chunks", ?err, "chunk header is invalid");
                                 self.encoded_chunks.remove(&chunk_hash);
-                                self.requested_partial_encoded_chunks.remove(&chunk_hash);
+                                self.chunk_request_orchestrator.remove(&chunk_hash);
                                 Err(err)
                             }
                         };
@@ -1876,7 +1757,7 @@ impl ShardsManagerActor {
         let chunk_hash = partial_chunk.chunk_hash();
         self.encoded_chunks.mark_entry_complete(&chunk_hash);
         self.encoded_chunks.remove_from_cache_if_outside_horizon(&chunk_hash);
-        self.requested_partial_encoded_chunks.remove(&chunk_hash);
+        self.chunk_request_orchestrator.remove(&chunk_hash);
         tracing::debug!(target: "chunks", ?chunk_hash, "completed chunk");
         self.client_adapter
             .send(ShardsManagerResponse::ChunkCompleted { partial_chunk, shard_chunk }.span_wrap());
@@ -2380,7 +2261,7 @@ mod test {
             DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON,
         );
         let added = clock.now().into();
-        shards_manager.requested_partial_encoded_chunks.insert(
+        shards_manager.chunk_request_orchestrator.insert(
             ChunkHash(hash(&[1])),
             ChunkRequestInfo {
                 height: 0,
@@ -2632,8 +2513,8 @@ mod test {
             account_id.as_ref(),
         );
         let marked_as_requested = shards_manager
-            .requested_partial_encoded_chunks
-            .contains_key(&fixture.mock_chunk_header.chunk_hash());
+            .chunk_request_orchestrator
+            .contains(&fixture.mock_chunk_header.chunk_hash());
 
         let mut sent_request_message_immediately = false;
         while let Some(_) = fixture.mock_network.pop() {

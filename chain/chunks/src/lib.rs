@@ -1,5 +1,6 @@
 pub mod adapter;
 mod chunk_cache;
+pub mod chunk_request_orchestrator;
 pub mod client;
 pub mod logic;
 pub mod metrics;
