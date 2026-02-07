@@ -82,24 +82,12 @@ pub(crate) struct ChunkRequestInfo {
 pub(crate) struct ChunkRequestOrchestrator {
     clock: Clock,
     epoch_manager: Arc<dyn EpochManagerAdapter>,
-    retry_duration: time::Duration,
-    switch_to_others_duration: time::Duration,
-    switch_to_full_fetch_duration: time::Duration,
-    max_duration: time::Duration,
     requests: HashMap<ChunkHash, ChunkRequestInfo>,
 }
 
 impl ChunkRequestOrchestrator {
     pub fn new(clock: Clock, epoch_manager: Arc<dyn EpochManagerAdapter>) -> Self {
-        Self {
-            clock,
-            epoch_manager,
-            retry_duration: CHUNK_REQUEST_RETRY,
-            switch_to_others_duration: CHUNK_REQUEST_SWITCH_TO_OTHERS,
-            switch_to_full_fetch_duration: CHUNK_REQUEST_SWITCH_TO_FULL_FETCH,
-            max_duration: CHUNK_REQUEST_RETRY_MAX,
-            requests: HashMap::default(),
-        }
+        Self { clock, epoch_manager, requests: HashMap::default() }
     }
 
     pub fn contains(&self, chunk_hash: &ChunkHash) -> bool {
@@ -133,7 +121,7 @@ impl ChunkRequestOrchestrator {
 
         // Evict expired requests.
         self.requests.retain(|chunk_hash, chunk_request| {
-            if current_time - chunk_request.added >= self.max_duration {
+            if current_time - chunk_request.added >= CHUNK_REQUEST_RETRY_MAX {
                 tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
                 return false;
             }
@@ -143,7 +131,7 @@ impl ChunkRequestOrchestrator {
         // Collect requests that are due for a retry.
         let mut due_requests = Vec::new();
         for (chunk_hash, chunk_request) in &mut self.requests {
-            if current_time - chunk_request.last_requested >= self.retry_duration {
+            if current_time - chunk_request.last_requested >= CHUNK_REQUEST_RETRY {
                 chunk_request.last_requested = current_time;
                 due_requests.push((chunk_hash.clone(), chunk_request.clone()));
             }
