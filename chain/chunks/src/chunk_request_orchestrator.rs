@@ -151,7 +151,7 @@ impl ChunkRequestOrchestrator {
 
         let mut actions = Vec::with_capacity(due_requests.len());
         for (chunk_hash, chunk_request) in due_requests {
-            let mut state = self.advance_state(&chunk_request);
+            let mut state = Self::advance_state(current_time - chunk_request.added);
             let (fetch_from_archival, old_block) = self.request_context(
                 &chunk_request.ancestor_hash,
                 &chunk_request.prev_block_hash,
@@ -198,11 +198,10 @@ impl ChunkRequestOrchestrator {
     }
 
     /// Determine the current escalation state based on elapsed time since request was added.
-    fn advance_state(&self, info: &ChunkRequestInfo) -> ChunkRequestState {
-        let elapsed = self.clock.now() - info.added;
-        if elapsed >= self.switch_to_full_fetch_duration {
+    fn advance_state(elapsed: std::time::Duration) -> ChunkRequestState {
+        if elapsed >= CHUNK_REQUEST_SWITCH_TO_FULL_FETCH {
             ChunkRequestState::FullFetch
-        } else if elapsed >= self.switch_to_others_duration {
+        } else if elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS {
             ChunkRequestState::RequestingFromOthers
         } else {
             ChunkRequestState::RequestingFromProducer
