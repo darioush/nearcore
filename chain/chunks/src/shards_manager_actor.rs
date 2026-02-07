@@ -81,7 +81,7 @@
 use crate::adapter::ShardsManagerRequestFromClient;
 use crate::chunk_cache::{EncodedChunksCache, EncodedChunksCacheEntry};
 use crate::chunk_request_orchestrator::{
-    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestInfo, ChunkRequestOrchestrator,
+    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestAction, ChunkRequestOrchestrator,
 };
 use crate::client::{ShardsManagerResponse, ShardsManagerResponseSender};
 use crate::logic::{
@@ -547,7 +547,55 @@ impl ShardsManagerActor {
             .collect::<HashSet<_>>()
     }
 
-    /// Only marks this chunk as being requested
+    /// Execute a chunk request action by sending the appropriate network messages.
+    fn execute_request_action(&self, action: ChunkRequestAction, me: Option<&AccountId>) {
+        match action {
+            ChunkRequestAction::SendRequest {
+                chunk_hash,
+                height,
+                ancestor_hash,
+                shard_id,
+                state,
+                request_from_archival,
+            } => {
+                if let Err(err) = self.request_partial_encoded_chunk(
+                    height,
+                    &ancestor_hash,
+                    shard_id,
+                    &chunk_hash,
+                    state.force_request_full(),
+                    state.request_own_parts_from_others(),
+                    request_from_archival,
+                    me,
+                ) {
+                    tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk");
+                }
+            }
+            ChunkRequestAction::None => {}
+        }
+    }
+
+    /// Track a single chunk as needed and optionally send the request.
+    fn request_chunk_single(
+        &mut self,
+        chunk_header: &ShardChunkHeader,
+        ancestor_hash: CryptoHash,
+        mark_only: bool,
+        me: Option<&AccountId>,
+    ) {
+        let is_complete = |hash: &ChunkHash| self.encoded_chunks.get(hash).map(|e| e.complete);
+        let action = self.chunk_request_orchestrator.track_needed_chunk(
+            chunk_header,
+            ancestor_hash,
+            mark_only,
+            is_complete,
+            &self.chain_header_head,
+            me,
+        );
+        self.execute_request_action(action, me);
+    }
+
+    /// Only marks this chunk as being requested.
     /// Note no requests are actually sent at this point.
     fn request_chunk_single_mark_only(
         &mut self,
@@ -557,116 +605,7 @@ impl ShardsManagerActor {
         self.request_chunk_single(chunk_header, *chunk_header.prev_block_hash(), true, me)
     }
 
-    /// send partial chunk requests for one chunk
-    /// `chunk_header`: the chunk being requested
-    /// `ancestor_hash`: hash of an ancestor block of the requested chunk.
-    ///                  It must satisfy
-    ///                  1) it is from the same epoch than `epoch_id`
-    ///                  2) it is processed
-    ///                  If the above conditions are not met, the request will be dropped
-    /// `mark_only`: if true, only add the request to the pool, but do not send it.
-    fn request_chunk_single(
-        &mut self,
-        chunk_header: &ShardChunkHeader,
-        ancestor_hash: CryptoHash,
-        mark_only: bool,
-        me: Option<&AccountId>,
-    ) {
-        let height = chunk_header.height_created();
-        let shard_id = chunk_header.shard_id();
-        let chunk_hash = chunk_header.chunk_hash();
-        let _span = debug_span!(
-            target: "chunks",
-            "request_chunk_single",
-            ?chunk_hash,
-            %shard_id,
-            height_created = height)
-        .entered();
-
-        if self.chunk_request_orchestrator.contains(&chunk_hash) {
-            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already being requested");
-            return;
-        }
-
-        if let Some(entry) = self.encoded_chunks.get(&chunk_header.chunk_hash()) {
-            if entry.complete {
-                tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete");
-                return;
-            }
-        } else {
-            // In all code paths that lead to this function, we have already inserted the header.
-            // However, if the chunk had just been processed and marked as complete, it might have
-            // been removed from the cache if it is out of horizon. So in this case, the chunk is
-            // already complete and we don't need to request anything.
-            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete and GC-ed");
-            return;
-        }
-
-        let prev_block_hash = *chunk_header.prev_block_hash();
-        self.chunk_request_orchestrator.insert(
-            chunk_hash.clone(),
-            ChunkRequestInfo {
-                height,
-                prev_block_hash,
-                ancestor_hash,
-                shard_id,
-                last_requested: self.clock.now().into(),
-                added: self.clock.now().into(),
-            },
-        );
-
-        if mark_only {
-            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "marked the chunk as being requested but did not send the request yet");
-            return;
-        }
-
-        let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
-                &ancestor_hash, &self.chain_header_head.last_block_hash,
-            self.epoch_manager.as_ref()).unwrap_or_else(|err| {
-                tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
-                false
-            });
-        let old_block = self.chain_header_head.last_block_hash != prev_block_hash
-            && self.chain_header_head.prev_block_hash != prev_block_hash;
-
-        let should_wait_for_chunk_forwarding =
-                self.chunk_request_orchestrator.should_wait_for_chunk_forwarding(&ancestor_hash, chunk_header.shard_id(), chunk_header.height_created()+1, me).unwrap_or_else(|_| {
-                    // ancestor_hash must be accepted because we don't request missing chunks through this
-                    // this function for orphans
-                    debug_assert!(false, "{:?} must be accepted", ancestor_hash);
-                    tracing::error!(target: "chunks", ?ancestor_hash, "requesting chunk whose ancestor_hash is not accepted");
-                    false
-                });
-
-        // If chunks forwarding is enabled,
-        // we purposely do not send chunk request messages right away for new blocks. Such requests
-        // will eventually be sent because of the `resend_chunk_requests` loop. However,
-        // we want to give some time for any `PartialEncodedChunkForward` messages to arrive
-        // before we send requests.
-        if !should_wait_for_chunk_forwarding || fetch_from_archival || old_block {
-            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "requesting");
-            let request_result = self.request_partial_encoded_chunk(
-                height,
-                &ancestor_hash,
-                shard_id,
-                &chunk_hash,
-                false,
-                old_block,
-                fetch_from_archival,
-                me,
-            );
-            if let Err(err) = request_result {
-                tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk");
-            }
-        } else {
-            tracing::debug!(target: "chunks",should_wait_for_chunk_forwarding, fetch_from_archival, old_block,  "delaying the chunk request");
-        }
-    }
-
-    /// send chunk requests for some chunks in a block
-    /// `chunks_to_request`: chunks to request
-    /// `prev_hash`: hash of prev block of the block we are requesting missing chunks for
-    ///              The function assumes the prev block is accepted
+    /// Send chunk requests for some chunks in a block.
     fn request_chunks(
         &mut self,
         chunks_to_request: Vec<ShardChunkHeader>,
@@ -685,13 +624,6 @@ impl ShardsManagerActor {
     }
 
     /// Request chunks for an orphan block.
-    /// `epoch_id`: epoch_id of the orphan block
-    /// `ancestor_hash`: because BlockInfo for the immediate parent of an orphan block is not ready,
-    ///                we use hash of an ancestor block of this orphan to request chunks. It must
-    ///                satisfy
-    ///                1) it is from the same epoch than `epoch_id`
-    ///                2) it is processed
-    ///                If the above conditions are not met, the request will be dropped
     fn request_chunks_for_orphan(
         &mut self,
         chunks_to_request: Vec<ShardChunkHeader>,
@@ -2204,6 +2136,7 @@ mod test {
 
     use super::*;
     use crate::DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON;
+    use crate::chunk_request_orchestrator::ChunkRequestInfo;
     use crate::logic::persist_chunk;
     use crate::test_utils::*;
 

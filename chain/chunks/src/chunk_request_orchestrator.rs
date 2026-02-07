@@ -1,8 +1,10 @@
+use crate::logic::chunk_needs_to_be_fetched_from_archival;
 use near_async::time::{self, Clock};
 use near_chain::types::EpochManagerAdapter;
+use near_primitives::block::Tip;
 use near_primitives::errors::EpochError;
 use near_primitives::hash::CryptoHash;
-use near_primitives::sharding::ChunkHash;
+use near_primitives::sharding::{ChunkHash, ShardChunkHeader};
 use near_primitives::stateless_validation::ChunkProductionKey;
 use near_primitives::types::{AccountId, BlockHeight, BlockHeightDelta, ShardId};
 use std::collections::{HashMap, HashSet};
@@ -14,6 +16,53 @@ pub const CHUNK_REQUEST_SWITCH_TO_FULL_FETCH: time::Duration = time::Duration::s
 pub(crate) const CHUNK_REQUEST_RETRY_MAX: time::Duration = time::Duration::seconds(1000);
 // Only request chunks from peers whose latest height >= chunk_height - CHUNK_REQUEST_PEER_HORIZON
 pub(crate) const CHUNK_REQUEST_PEER_HORIZON: BlockHeightDelta = 5;
+
+/// The escalation state of a chunk request. Transitions are driven by elapsed
+/// time since the request was added.
+///
+///   WaitingForForwarding --> RequestingFromProducer --> RequestingFromOthers --> FullFetch --> [evicted]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChunkRequestState {
+    /// Waiting for chunk parts to be forwarded before sending any requests.
+    WaitingForForwarding,
+    /// Requesting from the original chunk producer only.
+    RequestingFromProducer,
+    /// Escalated: also requesting own parts from other validators.
+    RequestingFromOthers,
+    /// Escalated: requesting all parts from anyone (full fetch).
+    FullFetch,
+}
+
+impl ChunkRequestState {
+    pub fn force_request_full(&self) -> bool {
+        matches!(self, ChunkRequestState::FullFetch)
+    }
+
+    pub fn request_own_parts_from_others(&self) -> bool {
+        matches!(self, ChunkRequestState::RequestingFromOthers | ChunkRequestState::FullFetch)
+    }
+
+    pub fn should_send_request(&self) -> bool {
+        !matches!(self, ChunkRequestState::WaitingForForwarding)
+    }
+}
+
+/// A decision returned by the orchestrator telling ShardsManagerActor what
+/// network action to take.
+#[derive(Debug)]
+pub(crate) enum ChunkRequestAction {
+    /// Send a partial encoded chunk request.
+    SendRequest {
+        chunk_hash: ChunkHash,
+        height: BlockHeight,
+        ancestor_hash: CryptoHash,
+        shard_id: ShardId,
+        state: ChunkRequestState,
+        request_from_archival: bool,
+    },
+    /// No action needed.
+    None,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChunkRequestInfo {
@@ -147,6 +196,117 @@ impl ChunkRequestOrchestrator {
 
     pub fn switch_to_others_duration(&self) -> time::Duration {
         self.pool.switch_to_others_duration
+    }
+
+    /// Record that we need this chunk. Returns the action to take now (if any).
+    ///
+    /// `chunk_header`: the chunk being requested
+    /// `ancestor_hash`: hash of an ancestor block of the requested chunk (same epoch, processed)
+    /// `mark_only`: if true, only add the request to the pool, don't send it
+    /// `is_chunk_complete`: closure returning whether the chunk is already complete in cache,
+    ///                      or None if the chunk is not in cache at all
+    /// `chain_header_head`: current header head tip
+    /// `me`: this node's account id, if it is a validator
+    pub fn track_needed_chunk(
+        &mut self,
+        chunk_header: &ShardChunkHeader,
+        ancestor_hash: CryptoHash,
+        mark_only: bool,
+        is_chunk_complete: impl FnOnce(&ChunkHash) -> Option<bool>,
+        chain_header_head: &Tip,
+        me: Option<&AccountId>,
+    ) -> ChunkRequestAction {
+        let height = chunk_header.height_created();
+        let shard_id = chunk_header.shard_id();
+        let chunk_hash = chunk_header.chunk_hash().clone();
+
+        if self.pool.contains_key(&chunk_hash) {
+            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already being requested");
+            return ChunkRequestAction::None;
+        }
+
+        match is_chunk_complete(&chunk_hash) {
+            Some(true) => {
+                tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete");
+                return ChunkRequestAction::None;
+            }
+            Some(false) => {
+                // chunk is in cache but not complete, proceed
+            }
+            None => {
+                // Not in cache at all. In all code paths that lead here, the header was already
+                // inserted. If missing, it was completed and GC-ed.
+                tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete and GC-ed");
+                return ChunkRequestAction::None;
+            }
+        }
+
+        let prev_block_hash = *chunk_header.prev_block_hash();
+        let now = self.clock.now().into();
+        self.pool.insert(
+            chunk_hash.clone(),
+            ChunkRequestInfo {
+                height,
+                prev_block_hash,
+                ancestor_hash,
+                shard_id,
+                last_requested: now,
+                added: now,
+            },
+        );
+
+        if mark_only {
+            tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "marked the chunk as being requested but did not send the request yet");
+            return ChunkRequestAction::None;
+        }
+
+        let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
+            &ancestor_hash,
+            &chain_header_head.last_block_hash,
+            self.epoch_manager.as_ref(),
+        )
+        .unwrap_or_else(|err| {
+            tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
+            false
+        });
+        let old_block = chain_header_head.last_block_hash != prev_block_hash
+            && chain_header_head.prev_block_hash != prev_block_hash;
+
+        let should_wait = self
+            .should_wait_for_chunk_forwarding(
+                &ancestor_hash,
+                shard_id,
+                height + 1,
+                me,
+            )
+            .unwrap_or_else(|_| {
+                debug_assert!(false, "{:?} must be accepted", ancestor_hash);
+                tracing::error!(target: "chunks", ?ancestor_hash, "requesting chunk whose ancestor_hash is not accepted");
+                false
+            });
+
+        let initial_state = if should_wait && !fetch_from_archival && !old_block {
+            ChunkRequestState::WaitingForForwarding
+        } else if old_block {
+            ChunkRequestState::RequestingFromOthers
+        } else {
+            ChunkRequestState::RequestingFromProducer
+        };
+
+        if !initial_state.should_send_request() {
+            tracing::debug!(target: "chunks", ?initial_state, "delaying the chunk request");
+            return ChunkRequestAction::None;
+        }
+
+        tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "requesting");
+        ChunkRequestAction::SendRequest {
+            chunk_hash,
+            height,
+            ancestor_hash,
+            shard_id,
+            state: initial_state,
+            request_from_archival: fetch_from_archival,
+        }
     }
 
     /// Check whether the node should wait for chunk parts being forwarded to it.
