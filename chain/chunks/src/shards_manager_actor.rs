@@ -81,7 +81,7 @@
 use crate::adapter::ShardsManagerRequestFromClient;
 use crate::chunk_cache::{EncodedChunksCache, EncodedChunksCacheEntry};
 use crate::chunk_request_orchestrator::{
-    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestAction, ChunkRequestOrchestrator,
+    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestOrchestrator, ChunkSendRequest,
 };
 use crate::client::{ShardsManagerResponse, ShardsManagerResponseSender};
 use crate::logic::{
@@ -547,32 +547,19 @@ impl ShardsManagerActor {
             .collect::<HashSet<_>>()
     }
 
-    /// Execute a chunk request action by sending the appropriate network messages.
-    fn execute_request_action(&self, action: ChunkRequestAction, me: Option<&AccountId>) {
-        match action {
-            ChunkRequestAction::SendRequest {
-                chunk_hash,
-                height,
-                ancestor_hash,
-                shard_id,
-                force_request_full,
-                request_own_parts_from_others,
-                request_from_archival,
-            } => {
-                if let Err(err) = self.request_partial_encoded_chunk(
-                    height,
-                    &ancestor_hash,
-                    shard_id,
-                    &chunk_hash,
-                    force_request_full,
-                    request_own_parts_from_others,
-                    request_from_archival,
-                    me,
-                ) {
-                    tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk");
-                }
-            }
-            ChunkRequestAction::None => {}
+    /// Execute a chunk send request by sending the appropriate network messages.
+    fn execute_send_request(&self, request: &ChunkSendRequest, me: Option<&AccountId>) {
+        if let Err(err) = self.request_partial_encoded_chunk(
+            request.height,
+            &request.ancestor_hash,
+            request.shard_id,
+            &request.chunk_hash,
+            request.force_request_full,
+            request.request_own_parts_from_others,
+            request.request_from_archival,
+            me,
+        ) {
+            tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk");
         }
     }
 
@@ -585,15 +572,16 @@ impl ShardsManagerActor {
         me: Option<&AccountId>,
     ) {
         let is_complete = |hash: &ChunkHash| self.encoded_chunks.get(hash).map(|e| e.complete);
-        let action = self.chunk_request_orchestrator.track_needed_chunk(
+        if let Some(request) = self.chunk_request_orchestrator.track_needed_chunk(
             chunk_header,
             ancestor_hash,
             mark_only,
             is_complete,
             &self.chain_header_head,
             me,
-        );
-        self.execute_request_action(action, me);
+        ) {
+            self.execute_send_request(&request, me);
+        }
     }
 
     /// Only marks this chunk as being requested.
@@ -659,9 +647,9 @@ impl ShardsManagerActor {
             pool_size = self.chunk_request_orchestrator.pending_count())
         .entered();
         let me = self.validator_signer.get().map(|signer| signer.validator_id().clone());
-        let actions = self.chunk_request_orchestrator.tick(&self.chain_header_head);
-        for action in actions {
-            self.execute_request_action(action, me.as_ref());
+        let requests = self.chunk_request_orchestrator.tick(&self.chain_header_head);
+        for request in &requests {
+            self.execute_send_request(request, me.as_ref());
         }
     }
 

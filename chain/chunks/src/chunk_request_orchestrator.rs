@@ -47,20 +47,15 @@ impl ChunkRequestState {
     }
 }
 
-/// A decision returned by the orchestrator telling ShardsManagerActor what
-/// network action to take.
 #[derive(Debug)]
-pub(crate) enum ChunkRequestAction {
-    SendRequest {
-        chunk_hash: ChunkHash,
-        height: BlockHeight,
-        ancestor_hash: CryptoHash,
-        shard_id: ShardId,
-        force_request_full: bool,
-        request_own_parts_from_others: bool,
-        request_from_archival: bool,
-    },
-    None,
+pub(crate) struct ChunkSendRequest {
+    pub chunk_hash: ChunkHash,
+    pub height: BlockHeight,
+    pub ancestor_hash: CryptoHash,
+    pub shard_id: ShardId,
+    pub force_request_full: bool,
+    pub request_own_parts_from_others: bool,
+    pub request_from_archival: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +109,7 @@ impl ChunkRequestOrchestrator {
 
     /// Called periodically; returns the set of requests to send now.
     /// Advances state for each request based on elapsed time and evicts expired ones.
-    pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkRequestAction> {
+    pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkSendRequest> {
         let current_time: time::Instant = self.clock.now().into();
 
         self.requests.retain(|chunk_hash, chunk_request| {
@@ -147,7 +142,7 @@ impl ChunkRequestOrchestrator {
                 state = ChunkRequestState::RequestingFromOthers;
             }
 
-            actions.push(ChunkRequestAction::SendRequest {
+            actions.push(ChunkSendRequest {
                 chunk_hash,
                 height: chunk_request.height,
                 ancestor_hash: chunk_request.ancestor_hash,
@@ -211,20 +206,20 @@ impl ChunkRequestOrchestrator {
         is_chunk_complete: impl FnOnce(&ChunkHash) -> Option<bool>,
         chain_header_head: &Tip,
         me: Option<&AccountId>,
-    ) -> ChunkRequestAction {
+    ) -> Option<ChunkSendRequest> {
         let height = chunk_header.height_created();
         let shard_id = chunk_header.shard_id();
         let chunk_hash = chunk_header.chunk_hash().clone();
 
         if self.requests.contains_key(&chunk_hash) {
             tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already being requested");
-            return ChunkRequestAction::None;
+            return None;
         }
 
         match is_chunk_complete(&chunk_hash) {
             Some(true) => {
                 tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete");
-                return ChunkRequestAction::None;
+                return None;
             }
             Some(false) => {
                 // chunk is in cache but not complete, proceed
@@ -233,7 +228,7 @@ impl ChunkRequestOrchestrator {
                 // Not in cache at all. In all code paths that lead here, the header was already
                 // inserted. If missing, it was completed and GC-ed.
                 tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already complete and GC-ed");
-                return ChunkRequestAction::None;
+                return None;
             }
         }
 
@@ -253,7 +248,7 @@ impl ChunkRequestOrchestrator {
 
         if mark_only {
             tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "marked the chunk as being requested but did not send the request yet");
-            return ChunkRequestAction::None;
+            return None;
         }
 
         let (fetch_from_archival, old_block) =
@@ -282,11 +277,11 @@ impl ChunkRequestOrchestrator {
 
         if !initial_state.should_send_request() {
             tracing::debug!(target: "chunks", ?initial_state, "delaying the chunk request");
-            return ChunkRequestAction::None;
+            return None;
         }
 
         tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "requesting");
-        ChunkRequestAction::SendRequest {
+        Some(ChunkSendRequest {
             chunk_hash,
             height,
             ancestor_hash,
@@ -294,7 +289,7 @@ impl ChunkRequestOrchestrator {
             force_request_full: initial_state.force_request_full(),
             request_own_parts_from_others: initial_state.request_own_parts_from_others(),
             request_from_archival: fetch_from_archival,
-        }
+        })
     }
 
     /// Check whether the node should wait for chunk parts being forwarded to it.
@@ -336,7 +331,6 @@ impl ChunkRequestOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert_matches::assert_matches;
     use near_async::time::FakeClock;
     use near_epoch_manager::test_utils::setup_epoch_manager_with_block_and_chunk_producers;
     use near_primitives::hash::hash;
@@ -432,10 +426,8 @@ mod tests {
         t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
         let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
-            assert!(!force_request_full);
-            assert!(!request_own_parts_from_others);
-        });
+        assert!(!actions[0].force_request_full);
+        assert!(!actions[0].request_own_parts_from_others);
     }
 
     #[test]
@@ -445,10 +437,8 @@ mod tests {
         t.clock.advance(CHUNK_REQUEST_SWITCH_TO_OTHERS + time::Duration::milliseconds(50));
         let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
-            assert!(!force_request_full);
-            assert!(request_own_parts_from_others);
-        });
+        assert!(!actions[0].force_request_full);
+        assert!(actions[0].request_own_parts_from_others);
     }
 
     #[test]
@@ -458,10 +448,8 @@ mod tests {
         t.clock.advance(CHUNK_REQUEST_SWITCH_TO_FULL_FETCH + time::Duration::milliseconds(50));
         let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
-            assert!(force_request_full);
-            assert!(request_own_parts_from_others);
-        });
+        assert!(actions[0].force_request_full);
+        assert!(actions[0].request_own_parts_from_others);
     }
 
     #[test]
@@ -507,10 +495,8 @@ mod tests {
         t.clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
         let actions = t.orchestrator.tick(&t.tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
-            assert!(!force_request_full);
-            assert!(request_own_parts_from_others);
-        });
+        assert!(!actions[0].force_request_full);
+        assert!(actions[0].request_own_parts_from_others);
     }
 
     #[test]
@@ -519,7 +505,7 @@ mod tests {
         let chunk_header = t.chunk_header(3);
         let chunk_hash = chunk_header.chunk_hash();
 
-        let action = t.orchestrator.track_needed_chunk(
+        let request = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
@@ -527,10 +513,9 @@ mod tests {
             &t.tip,
             None,
         );
-        assert_matches!(action, ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
-            assert!(!force_request_full);
-            assert!(!request_own_parts_from_others);
-        });
+        let request = request.expect("expected a send request");
+        assert!(!request.force_request_full);
+        assert!(!request.request_own_parts_from_others);
         assert!(t.orchestrator.contains(&chunk_hash));
     }
 
@@ -541,7 +526,7 @@ mod tests {
         let chunk_hash = chunk_header.chunk_hash();
         let me: AccountId = "test".parse().unwrap();
 
-        let action = t.orchestrator.track_needed_chunk(
+        let request = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
@@ -549,7 +534,7 @@ mod tests {
             &t.tip,
             Some(&me),
         );
-        assert_matches!(action, ChunkRequestAction::None);
+        assert!(request.is_none());
         assert!(t.orchestrator.contains(&chunk_hash));
     }
 
@@ -567,7 +552,7 @@ mod tests {
             None,
         );
 
-        let action = t.orchestrator.track_needed_chunk(
+        let request = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
@@ -575,7 +560,7 @@ mod tests {
             &t.tip,
             None,
         );
-        assert_matches!(action, ChunkRequestAction::None);
+        assert!(request.is_none());
     }
 
     #[test]
@@ -583,7 +568,7 @@ mod tests {
         let mut t = TestFixture::new();
         let chunk_header = t.chunk_header(3);
 
-        let action = t.orchestrator.track_needed_chunk(
+        let request = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             false,
@@ -591,7 +576,7 @@ mod tests {
             &t.tip,
             None,
         );
-        assert_matches!(action, ChunkRequestAction::None);
+        assert!(request.is_none());
         assert!(!t.orchestrator.contains(&chunk_header.chunk_hash()));
     }
 
@@ -600,7 +585,7 @@ mod tests {
         let mut t = TestFixture::new();
         let chunk_header = t.chunk_header(3);
 
-        let action = t.orchestrator.track_needed_chunk(
+        let request = t.orchestrator.track_needed_chunk(
             &chunk_header,
             CryptoHash::default(),
             true,
@@ -608,7 +593,7 @@ mod tests {
             &t.tip,
             None,
         );
-        assert_matches!(action, ChunkRequestAction::None);
+        assert!(request.is_none());
         assert!(t.orchestrator.contains(&chunk_header.chunk_hash()));
     }
 
