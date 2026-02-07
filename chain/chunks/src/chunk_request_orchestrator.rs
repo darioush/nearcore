@@ -7,7 +7,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::sharding::{ChunkHash, ShardChunkHeader};
 use near_primitives::stateless_validation::ChunkProductionKey;
 use near_primitives::types::{AccountId, BlockHeight, BlockHeightDelta, ShardId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const CHUNK_REQUEST_RETRY: time::Duration = time::Duration::milliseconds(100);
@@ -77,75 +77,16 @@ pub(crate) struct ChunkRequestInfo {
     pub last_requested: time::Instant,
 }
 
-pub(crate) struct RequestPool {
-    pub retry_duration: time::Duration,
-    pub switch_to_others_duration: time::Duration,
-    pub switch_to_full_fetch_duration: time::Duration,
-    pub max_duration: time::Duration,
-    pub requests: HashMap<ChunkHash, ChunkRequestInfo>,
-}
-
-impl RequestPool {
-    pub fn new(
-        retry_duration: time::Duration,
-        switch_to_others_duration: time::Duration,
-        switch_to_full_fetch_duration: time::Duration,
-        max_duration: time::Duration,
-    ) -> Self {
-        Self {
-            retry_duration,
-            switch_to_others_duration,
-            switch_to_full_fetch_duration,
-            max_duration,
-            requests: HashMap::default(),
-        }
-    }
-    pub fn contains_key(&self, chunk_hash: &ChunkHash) -> bool {
-        self.requests.contains_key(chunk_hash)
-    }
-    pub fn len(&self) -> usize {
-        self.requests.len()
-    }
-
-    pub fn insert(&mut self, chunk_hash: ChunkHash, chunk_request: ChunkRequestInfo) {
-        self.requests.insert(chunk_hash, chunk_request);
-    }
-
-    pub fn get_request_info(&self, chunk_hash: &ChunkHash) -> Option<&ChunkRequestInfo> {
-        self.requests.get(chunk_hash)
-    }
-
-    pub fn remove(&mut self, chunk_hash: &ChunkHash) {
-        self.requests.remove(chunk_hash);
-    }
-
-    pub fn fetch(&mut self, current_time: time::Instant) -> Vec<(ChunkHash, ChunkRequestInfo)> {
-        let mut removed_requests = HashSet::<ChunkHash>::default();
-        let mut requests = Vec::new();
-        for (chunk_hash, chunk_request) in &mut self.requests {
-            if current_time - chunk_request.added >= self.max_duration {
-                tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
-                removed_requests.insert(chunk_hash.clone());
-                continue;
-            }
-            if current_time - chunk_request.last_requested >= self.retry_duration {
-                chunk_request.last_requested = current_time;
-                requests.push((chunk_hash.clone(), chunk_request.clone()));
-            }
-        }
-        for chunk_hash in removed_requests {
-            self.requests.remove(&chunk_hash);
-        }
-        requests
-    }
-}
-
 /// Orchestrates chunk request lifecycle: tracking which chunks are needed,
 /// managing the request pool, and deciding when/how to escalate requests.
 pub(crate) struct ChunkRequestOrchestrator {
     clock: Clock,
     epoch_manager: Arc<dyn EpochManagerAdapter>,
-    pool: RequestPool,
+    retry_duration: time::Duration,
+    switch_to_others_duration: time::Duration,
+    switch_to_full_fetch_duration: time::Duration,
+    max_duration: time::Duration,
+    requests: HashMap<ChunkHash, ChunkRequestInfo>,
 }
 
 impl ChunkRequestOrchestrator {
@@ -153,45 +94,63 @@ impl ChunkRequestOrchestrator {
         Self {
             clock,
             epoch_manager,
-            pool: RequestPool::new(
-                CHUNK_REQUEST_RETRY,
-                CHUNK_REQUEST_SWITCH_TO_OTHERS,
-                CHUNK_REQUEST_SWITCH_TO_FULL_FETCH,
-                CHUNK_REQUEST_RETRY_MAX,
-            ),
+            retry_duration: CHUNK_REQUEST_RETRY,
+            switch_to_others_duration: CHUNK_REQUEST_SWITCH_TO_OTHERS,
+            switch_to_full_fetch_duration: CHUNK_REQUEST_SWITCH_TO_FULL_FETCH,
+            max_duration: CHUNK_REQUEST_RETRY_MAX,
+            requests: HashMap::default(),
         }
     }
 
     pub fn contains(&self, chunk_hash: &ChunkHash) -> bool {
-        self.pool.contains_key(chunk_hash)
+        self.requests.contains_key(chunk_hash)
     }
 
     pub fn get_request_info(&self, chunk_hash: &ChunkHash) -> Option<&ChunkRequestInfo> {
-        self.pool.get_request_info(chunk_hash)
+        self.requests.get(chunk_hash)
     }
 
     pub fn insert(&mut self, chunk_hash: ChunkHash, chunk_request: ChunkRequestInfo) {
-        self.pool.insert(chunk_hash, chunk_request);
+        self.requests.insert(chunk_hash, chunk_request);
     }
 
     pub fn remove(&mut self, chunk_hash: &ChunkHash) {
-        self.pool.remove(chunk_hash);
+        self.requests.remove(chunk_hash);
     }
 
     pub fn pending_count(&self) -> usize {
-        self.pool.len()
+        self.requests.len()
     }
 
     pub fn requests(&self) -> &HashMap<ChunkHash, ChunkRequestInfo> {
-        &self.pool.requests
+        &self.requests
     }
 
     /// Called periodically; returns the set of requests to send now.
     /// Advances state for each request based on elapsed time and evicts expired ones.
     pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkRequestAction> {
-        let requests = self.pool.fetch(self.clock.now().into());
-        let mut actions = Vec::with_capacity(requests.len());
-        for (chunk_hash, chunk_request) in requests {
+        let current_time: time::Instant = self.clock.now().into();
+
+        // Evict expired requests.
+        self.requests.retain(|chunk_hash, chunk_request| {
+            if current_time - chunk_request.added >= self.max_duration {
+                tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
+                return false;
+            }
+            true
+        });
+
+        // Collect requests that are due for a retry.
+        let mut due_requests = Vec::new();
+        for (chunk_hash, chunk_request) in &mut self.requests {
+            if current_time - chunk_request.last_requested >= self.retry_duration {
+                chunk_request.last_requested = current_time;
+                due_requests.push((chunk_hash.clone(), chunk_request.clone()));
+            }
+        }
+
+        let mut actions = Vec::with_capacity(due_requests.len());
+        for (chunk_hash, chunk_request) in due_requests {
             let mut state = self.advance_state(&chunk_request);
 
             let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
@@ -228,9 +187,9 @@ impl ChunkRequestOrchestrator {
     /// Determine the current escalation state based on elapsed time since request was added.
     fn advance_state(&self, info: &ChunkRequestInfo) -> ChunkRequestState {
         let elapsed = self.clock.now() - info.added;
-        if elapsed >= self.pool.switch_to_full_fetch_duration {
+        if elapsed >= self.switch_to_full_fetch_duration {
             ChunkRequestState::FullFetch
-        } else if elapsed >= self.pool.switch_to_others_duration {
+        } else if elapsed >= self.switch_to_others_duration {
             ChunkRequestState::RequestingFromOthers
         } else {
             ChunkRequestState::RequestingFromProducer
@@ -259,7 +218,7 @@ impl ChunkRequestOrchestrator {
         let shard_id = chunk_header.shard_id();
         let chunk_hash = chunk_header.chunk_hash().clone();
 
-        if self.pool.contains_key(&chunk_hash) {
+        if self.requests.contains_key(&chunk_hash) {
             tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "not requesting chunk, already being requested");
             return ChunkRequestAction::None;
         }
@@ -282,7 +241,7 @@ impl ChunkRequestOrchestrator {
 
         let prev_block_hash = *chunk_header.prev_block_hash();
         let now = self.clock.now().into();
-        self.pool.insert(
+        self.requests.insert(
             chunk_hash.clone(),
             ChunkRequestInfo {
                 height,
