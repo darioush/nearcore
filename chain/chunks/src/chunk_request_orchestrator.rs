@@ -112,53 +112,47 @@ impl ChunkRequestOrchestrator {
     pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkSendRequest> {
         let current_time: time::Instant = self.clock.now().into();
 
+        let mut actions = Vec::new();
+        let epoch_manager = self.epoch_manager.as_ref();
         self.requests.retain(|chunk_hash, chunk_request| {
             if current_time - chunk_request.added >= CHUNK_REQUEST_RETRY_MAX {
                 tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
                 return false;
             }
-            true
-        });
-
-        // Collect requests that are due for a retry.
-        let mut due_requests = Vec::new();
-        for (chunk_hash, chunk_request) in &mut self.requests {
             if current_time - chunk_request.last_requested >= CHUNK_REQUEST_RETRY {
                 chunk_request.last_requested = current_time;
-                due_requests.push((chunk_hash.clone(), chunk_request.clone()));
+
+                let mut state = Self::advance_state(current_time - chunk_request.added);
+                let (is_old, fetch_from_archival) = Self::staleness_and_archival(
+                    epoch_manager,
+                    &chunk_request.ancestor_hash,
+                    &chunk_request.prev_block_hash,
+                    chain_header_head,
+                );
+
+                if is_old && state == ChunkRequestState::RequestingFromProducer {
+                    state = ChunkRequestState::RequestingFromOthers;
+                }
+
+                actions.push(ChunkSendRequest {
+                    chunk_hash: chunk_hash.clone(),
+                    height: chunk_request.height,
+                    ancestor_hash: chunk_request.ancestor_hash,
+                    shard_id: chunk_request.shard_id,
+                    force_request_full: state.force_request_full(),
+                    request_own_parts_from_others: state.request_own_parts_from_others(),
+                    request_from_archival: fetch_from_archival,
+                });
             }
-        }
-
-        let mut actions = Vec::with_capacity(due_requests.len());
-        for (chunk_hash, chunk_request) in due_requests {
-            let mut state = Self::advance_state(current_time - chunk_request.added);
-            let (is_old, fetch_from_archival) = self.staleness_and_archival(
-                &chunk_request.ancestor_hash,
-                &chunk_request.prev_block_hash,
-                chain_header_head,
-            );
-
-            if is_old && state == ChunkRequestState::RequestingFromProducer {
-                state = ChunkRequestState::RequestingFromOthers;
-            }
-
-            actions.push(ChunkSendRequest {
-                chunk_hash,
-                height: chunk_request.height,
-                ancestor_hash: chunk_request.ancestor_hash,
-                shard_id: chunk_request.shard_id,
-                force_request_full: state.force_request_full(),
-                request_own_parts_from_others: state.request_own_parts_from_others(),
-                request_from_archival: fetch_from_archival,
-            });
-        }
+            true
+        });
         actions
     }
 
     /// Compute whether the chunk's block is old (more than one block behind the tip)
     /// and whether the request needs an archival node. Returns `(is_old, fetch_from_archival)`.
     fn staleness_and_archival(
-        &self,
+        epoch_manager: &dyn EpochManagerAdapter,
         ancestor_hash: &CryptoHash,
         prev_block_hash: &CryptoHash,
         tip: &Tip,
@@ -166,7 +160,7 @@ impl ChunkRequestOrchestrator {
         let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
             ancestor_hash,
             &tip.last_block_hash,
-            self.epoch_manager.as_ref(),
+            epoch_manager,
         )
         .unwrap_or_else(|err| {
             debug_assert!(false);
@@ -251,8 +245,12 @@ impl ChunkRequestOrchestrator {
             return None;
         }
 
-        let (is_old, fetch_from_archival) =
-            self.staleness_and_archival(&ancestor_hash, &prev_block_hash, chain_header_head);
+        let (is_old, fetch_from_archival) = Self::staleness_and_archival(
+            self.epoch_manager.as_ref(),
+            &ancestor_hash,
+            &prev_block_hash,
+            chain_header_head,
+        );
 
         let should_wait = self
             .should_wait_for_chunk_forwarding(
