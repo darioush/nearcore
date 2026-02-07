@@ -51,7 +51,6 @@ impl ChunkRequestState {
 /// network action to take.
 #[derive(Debug)]
 pub(crate) enum ChunkRequestAction {
-    /// Send a partial encoded chunk request.
     SendRequest {
         chunk_hash: ChunkHash,
         height: BlockHeight,
@@ -61,7 +60,6 @@ pub(crate) enum ChunkRequestAction {
         request_own_parts_from_others: bool,
         request_from_archival: bool,
     },
-    /// No action needed.
     None,
 }
 
@@ -71,7 +69,6 @@ pub(crate) struct ChunkRequestInfo {
     // hash of the ancestor hash used for the request, i.e., the first block up the
     // parent chain of the block that has missing chunks that is approved
     pub ancestor_hash: CryptoHash,
-    // previous block hash of the chunk
     pub prev_block_hash: CryptoHash,
     pub shard_id: ShardId,
     pub added: time::Instant,
@@ -120,7 +117,6 @@ impl ChunkRequestOrchestrator {
     pub fn tick(&mut self, chain_header_head: &Tip) -> Vec<ChunkRequestAction> {
         let current_time: time::Instant = self.clock.now().into();
 
-        // Evict expired requests.
         self.requests.retain(|chunk_hash, chunk_request| {
             if current_time - chunk_request.added >= CHUNK_REQUEST_RETRY_MAX {
                 tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %chunk_request.shard_id, "evicted chunk requested that was never fetched");
@@ -311,7 +307,6 @@ impl ChunkRequestOrchestrator {
         next_chunk_height: BlockHeight,
         me: Option<&AccountId>,
     ) -> Result<bool, EpochError> {
-        // chunks will not be forwarded to non-validators
         let me = match me {
             None => return Ok(false),
             Some(it) => it,
