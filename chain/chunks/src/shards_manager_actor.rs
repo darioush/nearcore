@@ -80,8 +80,8 @@
 
 use crate::adapter::ShardsManagerRequestFromClient;
 use crate::chunk_cache::{
-    CHUNK_REQUEST_PEER_HORIZON, ChunkRequestState, ChunkSendRequest, EncodedChunksCache,
-    EncodedChunksCacheEntry, RequestInfo, staleness_and_archival,
+    CHUNK_REQUEST_PEER_HORIZON, ChunkSendRequest, EncodedChunksCache, EncodedChunksCacheEntry,
+    RequestInfo, staleness_and_archival,
 };
 use crate::client::{ShardsManagerResponse, ShardsManagerResponseSender};
 use crate::logic::{
@@ -622,23 +622,20 @@ impl ShardsManagerActor {
                 false
             });
 
-        let initial_state = if should_wait && !fetch_from_archival && !is_old {
+        if should_wait && !fetch_from_archival && !is_old {
             tracing::debug!(target: "chunks", "delaying the chunk request, waiting for forwarding");
             return;
-        } else if is_old {
-            ChunkRequestState::RequestingFromOthers
-        } else {
-            ChunkRequestState::RequestingFromProducer
-        };
+        }
 
+        let targets = crate::chunk_cache::request_targets(std::time::Duration::ZERO, is_old);
         tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "requesting");
         let request = ChunkSendRequest {
             chunk_hash: chunk_hash.clone(),
             height,
             ancestor_hash,
             shard_id,
-            force_request_full: initial_state.force_request_full(),
-            request_own_parts_from_others: initial_state.request_own_parts_from_others(),
+            force_request_full: targets.force_request_full,
+            request_own_parts_from_others: targets.request_own_parts_from_others,
             request_from_archival: fetch_from_archival,
         };
         self.execute_send_request(&request, me);

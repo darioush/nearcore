@@ -168,28 +168,11 @@ pub(crate) enum ChunkState {
     Complete,
 }
 
-/// The escalation state of a chunk request. Transitions are driven by elapsed
-/// time since the request was added.
-///
-///   RequestingFromProducer --> RequestingFromOthers --> FullFetch --> [evicted]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChunkRequestState {
-    /// Requesting from the original chunk producer only.
-    RequestingFromProducer,
-    /// Escalated: also requesting own parts from other validators.
-    RequestingFromOthers,
-    /// Escalated: requesting all parts from anyone (full fetch).
-    FullFetch,
-}
-
-impl ChunkRequestState {
-    pub fn force_request_full(&self) -> bool {
-        matches!(self, ChunkRequestState::FullFetch)
-    }
-
-    pub fn request_own_parts_from_others(&self) -> bool {
-        matches!(self, ChunkRequestState::RequestingFromOthers | ChunkRequestState::FullFetch)
-    }
+/// Who to send chunk requests to, based on elapsed time and staleness.
+#[derive(Clone, Debug)]
+pub(crate) struct RequestTargets {
+    pub request_own_parts_from_others: bool,
+    pub force_request_full: bool,
 }
 
 /// Metadata for an active chunk request.
@@ -301,25 +284,21 @@ impl EncodedChunksCache {
             }
             info.last_requested = now;
 
-            let mut state = advance_state(now - info.added);
             let (is_old, fetch_from_archival) = staleness_and_archival(
                 epoch_manager,
                 &info.ancestor_hash,
                 entry.header.prev_block_hash(),
                 chain_header_head,
             );
-
-            if is_old && state == ChunkRequestState::RequestingFromProducer {
-                state = ChunkRequestState::RequestingFromOthers;
-            }
+            let targets = request_targets(now - info.added, is_old);
 
             actions.push(ChunkSendRequest {
                 chunk_hash: chunk_hash.clone(),
                 height: entry.header.height_created(),
                 ancestor_hash: info.ancestor_hash,
                 shard_id: entry.header.shard_id(),
-                force_request_full: state.force_request_full(),
-                request_own_parts_from_others: state.request_own_parts_from_others(),
+                force_request_full: targets.force_request_full,
+                request_own_parts_from_others: targets.request_own_parts_from_others,
                 request_from_archival: fetch_from_archival,
             });
         }
@@ -512,14 +491,14 @@ impl EncodedChunksCache {
     }
 }
 
-/// Determine the current escalation state based on elapsed time since request was added.
-pub(crate) fn advance_state(elapsed: std::time::Duration) -> ChunkRequestState {
+/// Determine request targets based on elapsed time and whether the chunk's block is old.
+pub(crate) fn request_targets(elapsed: std::time::Duration, is_old: bool) -> RequestTargets {
     if elapsed >= CHUNK_REQUEST_SWITCH_TO_FULL_FETCH {
-        ChunkRequestState::FullFetch
-    } else if elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS {
-        ChunkRequestState::RequestingFromOthers
+        RequestTargets { request_own_parts_from_others: true, force_request_full: true }
+    } else if elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS || is_old {
+        RequestTargets { request_own_parts_from_others: true, force_request_full: false }
     } else {
-        ChunkRequestState::RequestingFromProducer
+        RequestTargets { request_own_parts_from_others: false, force_request_full: false }
     }
 }
 
