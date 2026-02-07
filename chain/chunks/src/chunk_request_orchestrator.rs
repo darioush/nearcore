@@ -152,22 +152,12 @@ impl ChunkRequestOrchestrator {
         let mut actions = Vec::with_capacity(due_requests.len());
         for (chunk_hash, chunk_request) in due_requests {
             let mut state = self.advance_state(&chunk_request);
-
-            let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
+            let (fetch_from_archival, old_block) = self.request_context(
                 &chunk_request.ancestor_hash,
-                &chain_header_head.last_block_hash,
-                self.epoch_manager.as_ref(),
-            )
-            .unwrap_or_else(|err| {
-                debug_assert!(false);
-                tracing::error!(target: "chunks", ?err, "error during re-requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
-                false
-            });
+                &chunk_request.prev_block_hash,
+                chain_header_head,
+            );
 
-            let old_block = chain_header_head.last_block_hash != chunk_request.prev_block_hash
-                && chain_header_head.prev_block_hash != chunk_request.prev_block_hash;
-
-            // old_block implies at least RequestingFromOthers (request_own_parts_from_others = true)
             if old_block && state == ChunkRequestState::RequestingFromProducer {
                 state = ChunkRequestState::RequestingFromOthers;
             }
@@ -182,6 +172,29 @@ impl ChunkRequestOrchestrator {
             });
         }
         actions
+    }
+
+    /// Compute whether the request needs an archival node and whether the chunk's block
+    /// is old (more than one block behind the tip). Returns `(fetch_from_archival, old_block)`.
+    fn request_context(
+        &self,
+        ancestor_hash: &CryptoHash,
+        prev_block_hash: &CryptoHash,
+        tip: &Tip,
+    ) -> (bool, bool) {
+        let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
+            ancestor_hash,
+            &tip.last_block_hash,
+            self.epoch_manager.as_ref(),
+        )
+        .unwrap_or_else(|err| {
+            debug_assert!(false);
+            tracing::error!(target: "chunks", ?err, "cannot determine whether to request chunk from archival node, defaulting to not");
+            false
+        });
+        let old_block =
+            tip.last_block_hash != *prev_block_hash && tip.prev_block_hash != *prev_block_hash;
+        (fetch_from_archival, old_block)
     }
 
     /// Determine the current escalation state based on elapsed time since request was added.
@@ -258,17 +271,8 @@ impl ChunkRequestOrchestrator {
             return ChunkRequestAction::None;
         }
 
-        let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
-            &ancestor_hash,
-            &chain_header_head.last_block_hash,
-            self.epoch_manager.as_ref(),
-        )
-        .unwrap_or_else(|err| {
-            tracing::error!(target: "chunks", ?err, "error during requesting partial encoded chunk, cannot determine whether to request from an archival node, defaulting to not");
-            false
-        });
-        let old_block = chain_header_head.last_block_hash != prev_block_hash
-            && chain_header_head.prev_block_hash != prev_block_hash;
+        let (fetch_from_archival, old_block) =
+            self.request_context(&ancestor_hash, &prev_block_hash, chain_header_head);
 
         let should_wait = self
             .should_wait_for_chunk_forwarding(
