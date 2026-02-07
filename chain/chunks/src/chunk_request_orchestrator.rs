@@ -57,7 +57,8 @@ pub(crate) enum ChunkRequestAction {
         height: BlockHeight,
         ancestor_hash: CryptoHash,
         shard_id: ShardId,
-        state: ChunkRequestState,
+        force_request_full: bool,
+        request_own_parts_from_others: bool,
         request_from_archival: bool,
     },
     /// No action needed.
@@ -155,7 +156,8 @@ impl ChunkRequestOrchestrator {
                 height: chunk_request.height,
                 ancestor_hash: chunk_request.ancestor_hash,
                 shard_id: chunk_request.shard_id,
-                state,
+                force_request_full: state.force_request_full(),
+                request_own_parts_from_others: state.request_own_parts_from_others(),
                 request_from_archival: fetch_from_archival,
             });
         }
@@ -293,7 +295,8 @@ impl ChunkRequestOrchestrator {
             height,
             ancestor_hash,
             shard_id,
-            state: initial_state,
+            force_request_full: initial_state.force_request_full(),
+            request_own_parts_from_others: initial_state.request_own_parts_from_others(),
             request_from_archival: fetch_from_archival,
         }
     }
@@ -424,8 +427,9 @@ mod tests {
         clock.advance(CHUNK_REQUEST_RETRY + time::Duration::milliseconds(50));
         let actions = orchestrator.tick(&tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { state, .. } => {
-            assert_eq!(*state, ChunkRequestState::RequestingFromProducer);
+        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
+            assert!(!force_request_full);
+            assert!(!request_own_parts_from_others);
         });
     }
 
@@ -443,8 +447,9 @@ mod tests {
         clock.advance(CHUNK_REQUEST_SWITCH_TO_OTHERS + time::Duration::milliseconds(50));
         let actions = orchestrator.tick(&tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { state, .. } => {
-            assert_eq!(*state, ChunkRequestState::RequestingFromOthers);
+        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
+            assert!(!force_request_full);
+            assert!(request_own_parts_from_others);
         });
     }
 
@@ -462,8 +467,9 @@ mod tests {
         clock.advance(CHUNK_REQUEST_SWITCH_TO_FULL_FETCH + time::Duration::milliseconds(50));
         let actions = orchestrator.tick(&tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { state, .. } => {
-            assert_eq!(*state, ChunkRequestState::FullFetch);
+        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
+            assert!(force_request_full);
+            assert!(request_own_parts_from_others);
         });
     }
 
@@ -537,9 +543,9 @@ mod tests {
         let tip = default_tip();
         let actions = orchestrator.tick(&tip);
         assert_eq!(actions.len(), 1);
-        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { state, .. } => {
-            // old_block should promote RequestingFromProducer → RequestingFromOthers.
-            assert_eq!(*state, ChunkRequestState::RequestingFromOthers);
+        assert_matches!(&actions[0], ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
+            assert!(!force_request_full);
+            assert!(request_own_parts_from_others);
         });
     }
 
@@ -574,8 +580,9 @@ mod tests {
         );
 
         // Should immediately send request (RequestingFromProducer).
-        assert_matches!(action, ChunkRequestAction::SendRequest { state, .. } => {
-            assert_eq!(state, ChunkRequestState::RequestingFromProducer);
+        assert_matches!(action, ChunkRequestAction::SendRequest { force_request_full, request_own_parts_from_others, .. } => {
+            assert!(!force_request_full);
+            assert!(!request_own_parts_from_others);
         });
         assert!(orchestrator.contains(&chunk_hash));
     }

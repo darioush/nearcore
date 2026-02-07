@@ -555,7 +555,8 @@ impl ShardsManagerActor {
                 height,
                 ancestor_hash,
                 shard_id,
-                state,
+                force_request_full,
+                request_own_parts_from_others,
                 request_from_archival,
             } => {
                 if let Err(err) = self.request_partial_encoded_chunk(
@@ -563,8 +564,8 @@ impl ShardsManagerActor {
                     &ancestor_hash,
                     shard_id,
                     &chunk_hash,
-                    state.force_request_full(),
-                    state.request_own_parts_from_others(),
+                    force_request_full,
+                    request_own_parts_from_others,
                     request_from_archival,
                     me,
                 ) {
