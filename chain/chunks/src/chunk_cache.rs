@@ -1,14 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use crate::logic::chunk_needs_to_be_fetched_from_archival;
 use crate::metrics;
+use ::time::ext::InstantExt as _;
+use near_async::time;
+use near_chain::types::EpochManagerAdapter;
+use near_primitives::block::Tip;
 use near_primitives::hash::CryptoHash;
 use near_primitives::sharding::{
     ChunkHash, PartialEncodedChunkPart, ReceiptProof, ShardChunkHeader,
 };
 use near_primitives::types::{BlockHeight, BlockHeightDelta, ShardId};
 use std::collections::hash_map::Entry::Occupied;
-use time::ext::InstantExt;
 
 // This file implements EncodedChunksCache, which provides three main functionalities:
 // 1) It stores a map from a chunk hash to all the parts and receipts received so far for the chunk.
@@ -40,8 +44,10 @@ pub struct EncodedChunksCacheEntry {
     pub header: ShardChunkHeader,
     pub parts: HashMap<u64, PartialEncodedChunkPart>,
     pub receipts: HashMap<ShardId, ReceiptProof>,
-    /// whether this entry has all parts and receipts
-    pub complete: bool,
+
+    /// Lifecycle state of this chunk, including request metadata if actively requesting.
+    pub(crate) state: ChunkState,
+
     /// whether this chunk is ready for inclusion for producing a block
     pub ready_for_inclusion: bool,
     /// Whether the header has been **fully** validated.
@@ -88,13 +94,28 @@ impl EncodedChunksCacheEntry {
             header,
             parts: HashMap::new(),
             receipts: HashMap::new(),
-            complete: false,
+            state: ChunkState::Receiving,
             ready_for_inclusion: false,
             header_fully_validated: false,
             created_at: Instant::now(),
             received_all_parts: false,
             received_all_receipts: false,
             could_reconstruct: false,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self.state, ChunkState::Complete)
+    }
+
+    pub fn is_requesting(&self) -> bool {
+        matches!(self.state, ChunkState::Requesting(_))
+    }
+
+    pub fn request_info(&self) -> Option<&RequestInfo> {
+        match &self.state {
+            ChunkState::Requesting(info) => Some(info),
+            _ => None,
         }
     }
 
@@ -122,6 +143,55 @@ impl EncodedChunksCacheEntry {
     }
 }
 
+pub const CHUNK_REQUEST_RETRY: time::Duration = time::Duration::milliseconds(100);
+pub const CHUNK_REQUEST_SWITCH_TO_OTHERS: time::Duration = time::Duration::milliseconds(400);
+pub const CHUNK_REQUEST_SWITCH_TO_FULL_FETCH: time::Duration = time::Duration::seconds(3);
+pub(crate) const CHUNK_REQUEST_RETRY_MAX: time::Duration = time::Duration::seconds(1000);
+/// Only request chunks from peers whose latest height >= chunk_height - CHUNK_REQUEST_PEER_HORIZON
+pub(crate) const CHUNK_REQUEST_PEER_HORIZON: BlockHeightDelta = 5;
+
+/// The lifecycle state of a chunk in the cache.
+///
+/// Every chunk in the cache is in exactly one of these states. The state
+/// determines whether the chunk is being actively requested and, if so,
+/// carries the request metadata. When an entry is removed from the cache
+/// the request metadata is automatically dropped, eliminating the class of
+/// bugs where request tracking and cache tracking get out of sync.
+#[derive(Clone, Debug)]
+pub(crate) enum ChunkState {
+    /// Parts are arriving (forwarded, unsolicited, or from a block header)
+    /// but we haven't decided to actively request yet.
+    Receiving,
+    /// We are actively requesting missing parts/receipts.
+    Requesting(RequestInfo),
+    /// All needed parts and receipts have been received. Terminal state.
+    Complete,
+}
+
+/// Metadata for an active chunk request.
+#[derive(Clone, Debug)]
+pub(crate) struct RequestInfo {
+    /// Hash of an ancestor block in the same epoch that is accepted.
+    /// Used for epoch_id resolution and archival checks.
+    pub ancestor_hash: CryptoHash,
+    /// When this request was first added to the pool.
+    pub added: time::Instant,
+    /// When the last network request was sent.
+    pub last_requested: time::Instant,
+}
+
+/// A decision returned by tick() telling the caller what network action to take.
+#[derive(Debug)]
+pub(crate) struct ChunkSendRequest {
+    pub chunk_hash: ChunkHash,
+    pub height: BlockHeight,
+    pub ancestor_hash: CryptoHash,
+    pub shard_id: ShardId,
+    pub force_request_full: bool,
+    pub request_own_parts_from_others: bool,
+    pub request_from_archival: bool,
+}
+
 impl EncodedChunksCache {
     pub fn new(height_horizon: BlockHeightDelta) -> Self {
         EncodedChunksCache {
@@ -138,15 +208,101 @@ impl EncodedChunksCache {
         self.encoded_chunks.get(chunk_hash)
     }
 
-    /// Mark an entry as complete, which means it has all parts and receipts needed
-    pub fn mark_entry_complete(&mut self, chunk_hash: &ChunkHash) {
+    /// Mark an entry as complete. Drops any RequestInfo automatically.
+    /// Removes the chunk from the incomplete_chunks index.
+    pub fn mark_complete(&mut self, chunk_hash: &ChunkHash) {
         if let Some(entry) = self.encoded_chunks.get_mut(chunk_hash) {
-            entry.complete = true;
-            let previous_block_hash = &entry.header.prev_block_hash().clone();
-            self.remove_chunk_from_incomplete_chunks(previous_block_hash, chunk_hash);
+            entry.state = ChunkState::Complete;
+            let previous_block_hash = entry.header.prev_block_hash().clone();
+            self.remove_chunk_from_incomplete_chunks(&previous_block_hash, chunk_hash);
         } else {
             tracing::warn!(target: "chunks", ?chunk_hash, "cannot mark non-existent entry as complete");
         }
+    }
+
+    /// Transition an entry to Requesting state with the given request metadata.
+    /// Only transitions from Receiving; entries already in Requesting, Complete,
+    /// or not in the cache are left unchanged. Returns true if the transition occurred.
+    pub fn start_requesting(&mut self, chunk_hash: &ChunkHash, request_info: RequestInfo) -> bool {
+        match self.encoded_chunks.get_mut(chunk_hash) {
+            Some(entry) => match &entry.state {
+                ChunkState::Receiving => {
+                    entry.state = ChunkState::Requesting(request_info);
+                    true
+                }
+                ChunkState::Requesting(_) | ChunkState::Complete => false,
+            },
+            None => false,
+        }
+    }
+
+    pub fn get_request_info(&self, chunk_hash: &ChunkHash) -> Option<&RequestInfo> {
+        self.encoded_chunks.get(chunk_hash)?.request_info()
+    }
+
+    pub fn is_requesting(&self, chunk_hash: &ChunkHash) -> bool {
+        self.encoded_chunks.get(chunk_hash).is_some_and(|e| e.is_requesting())
+    }
+
+    pub fn requesting_count(&self) -> usize {
+        self.encoded_chunks.values().filter(|e| e.is_requesting()).count()
+    }
+
+    /// Called periodically; returns the set of requests to send now.
+    /// Iterates all cache entries, advancing escalation state for Requesting
+    /// entries and evicting expired ones.
+    pub fn tick(
+        &mut self,
+        now: time::Instant,
+        chain_header_head: &Tip,
+        epoch_manager: &dyn EpochManagerAdapter,
+    ) -> Vec<ChunkSendRequest> {
+        let mut actions = Vec::new();
+        let mut to_evict = Vec::new();
+
+        for (chunk_hash, entry) in &mut self.encoded_chunks {
+            let info = match &mut entry.state {
+                ChunkState::Requesting(info) => info,
+                _ => continue,
+            };
+
+            if now - info.added >= CHUNK_REQUEST_RETRY_MAX {
+                tracing::debug!(target: "chunks", ?chunk_hash, shard_id = %entry.header.shard_id(), "evicted chunk requested that was never fetched");
+                to_evict.push(chunk_hash.clone());
+                continue;
+            }
+
+            if now - info.last_requested < CHUNK_REQUEST_RETRY {
+                continue;
+            }
+            info.last_requested = now;
+
+            let (is_old, fetch_from_archival) = staleness_and_archival(
+                epoch_manager,
+                &info.ancestor_hash,
+                entry.header.prev_block_hash(),
+                chain_header_head,
+            );
+            let elapsed = now - info.added;
+            let request_own_parts_from_others = is_old || elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS;
+            let force_request_full = elapsed >= CHUNK_REQUEST_SWITCH_TO_FULL_FETCH;
+
+            actions.push(ChunkSendRequest {
+                chunk_hash: chunk_hash.clone(),
+                height: entry.header.height_created(),
+                ancestor_hash: info.ancestor_hash,
+                shard_id: entry.header.shard_id(),
+                force_request_full,
+                request_own_parts_from_others,
+                request_from_archival: fetch_from_archival,
+            });
+        }
+
+        for chunk_hash in to_evict {
+            self.remove(&chunk_hash);
+        }
+
+        actions
     }
 
     pub fn mark_received_all_receipts(&mut self, chunk_hash: &ChunkHash) {
@@ -299,11 +455,7 @@ impl EncodedChunksCache {
     }
 
     /// Update largest seen height and removes chunks from the cache that are outside of horizon
-    pub fn update_largest_seen_height<T>(
-        &mut self,
-        new_height: BlockHeight,
-        requested_chunks: &HashMap<ChunkHash, T>,
-    ) {
+    pub fn update_largest_seen_height(&mut self, new_height: BlockHeight) {
         let old_largest_seen_height = self.largest_seen_height;
         self.largest_seen_height = new_height;
         for height in old_largest_seen_height.saturating_sub(self.height_horizon)
@@ -311,9 +463,10 @@ impl EncodedChunksCache {
         {
             if let Some(chunks_to_remove) = self.height_map.remove(&height) {
                 for chunk_hash in chunks_to_remove {
-                    if !requested_chunks.contains_key(&chunk_hash) {
-                        self.remove(&chunk_hash);
+                    if self.encoded_chunks.get(&chunk_hash).is_some_and(|e| e.is_requesting()) {
+                        continue;
                     }
+                    self.remove(&chunk_hash);
                 }
             }
             self.height_to_shard_to_chunk.remove(&height);
@@ -333,20 +486,39 @@ impl EncodedChunksCache {
     }
 }
 
+/// Compute whether the chunk's block is old (more than one block behind the tip)
+/// and whether the request needs an archival node. Returns `(is_old, fetch_from_archival)`.
+pub(crate) fn staleness_and_archival(
+    epoch_manager: &dyn EpochManagerAdapter,
+    ancestor_hash: &CryptoHash,
+    prev_block_hash: &CryptoHash,
+    tip: &Tip,
+) -> (bool, bool) {
+    let fetch_from_archival = chunk_needs_to_be_fetched_from_archival(
+        ancestor_hash,
+        &tip.last_block_hash,
+        epoch_manager,
+    )
+    .unwrap_or_else(|err| {
+        debug_assert!(false);
+        tracing::error!(target: "chunks", ?err, "cannot determine whether to request chunk from archival node, defaulting to not");
+        false
+    });
+    let is_old = tip.last_block_hash != *prev_block_hash && tip.prev_block_hash != *prev_block_hash;
+    (is_old, fetch_from_archival)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
-    use super::DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON;
+    use super::*;
     use near_crypto::KeyType;
     use near_primitives::hash::CryptoHash;
     use near_primitives::sharding::{ShardChunkHeader, ShardChunkHeaderV2};
     use near_primitives::types::Balance;
     use near_primitives::types::{Gas, ShardId};
     use near_primitives::validator_signer::InMemoryValidatorSigner;
-
-    use crate::chunk_cache::EncodedChunksCache;
-    use crate::shards_manager_actor::ChunkRequestInfo;
 
     fn create_chunk_header(height: u64, shard_id: ShardId) -> ShardChunkHeader {
         let signer =
@@ -384,12 +556,12 @@ mod tests {
             cache.get_incomplete_chunks(&CryptoHash::default()).unwrap(),
             &HashSet::from([header0.chunk_hash().clone(), header1.chunk_hash().clone()])
         );
-        cache.mark_entry_complete(&header0.chunk_hash());
+        cache.mark_complete(&header0.chunk_hash());
         assert_eq!(
             cache.get_incomplete_chunks(&CryptoHash::default()).unwrap(),
             &[header1.chunk_hash().clone()].into_iter().collect::<HashSet<_>>()
         );
-        cache.mark_entry_complete(&header1.chunk_hash());
+        cache.mark_complete(&header1.chunk_hash());
         assert_eq!(cache.get_incomplete_chunks(&CryptoHash::default()), None);
     }
 
@@ -404,8 +576,88 @@ mod tests {
         );
         assert!(!cache.height_map.is_empty());
 
-        cache.update_largest_seen_height::<ChunkRequestInfo>(2000, &HashMap::default());
+        cache.update_largest_seen_height(2000);
         assert!(cache.encoded_chunks.is_empty());
         assert!(cache.height_map.is_empty());
+    }
+
+    #[test]
+    fn test_mark_complete_drops_request_info() {
+        let mut cache = EncodedChunksCache::new(DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON);
+        let header = create_chunk_header(1, ShardId::new(0));
+        let chunk_hash = header.chunk_hash();
+        cache.get_or_insert_from_header(&header);
+
+        let now = time::Instant::now();
+        cache.start_requesting(
+            &chunk_hash,
+            RequestInfo { ancestor_hash: CryptoHash::default(), added: now, last_requested: now },
+        );
+        assert!(cache.is_requesting(&chunk_hash));
+
+        cache.mark_complete(&chunk_hash);
+        assert!(!cache.is_requesting(&chunk_hash));
+        assert!(cache.get(&chunk_hash).unwrap().is_complete());
+        assert!(cache.get_request_info(&chunk_hash).is_none());
+    }
+
+    #[test]
+    fn test_remove_drops_request_info() {
+        let mut cache = EncodedChunksCache::new(DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON);
+        let header = create_chunk_header(1, ShardId::new(0));
+        let chunk_hash = header.chunk_hash();
+        cache.get_or_insert_from_header(&header);
+
+        let now = time::Instant::now();
+        cache.start_requesting(
+            &chunk_hash,
+            RequestInfo { ancestor_hash: CryptoHash::default(), added: now, last_requested: now },
+        );
+        assert!(cache.is_requesting(&chunk_hash));
+        assert_eq!(cache.requesting_count(), 1);
+
+        cache.remove(&chunk_hash);
+        assert!(!cache.is_requesting(&chunk_hash));
+        assert_eq!(cache.requesting_count(), 0);
+    }
+
+    #[test]
+    fn test_start_requesting_only_from_receiving() {
+        let mut cache = EncodedChunksCache::new(DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON);
+        let header = create_chunk_header(1, ShardId::new(0));
+        let chunk_hash = header.chunk_hash();
+        cache.get_or_insert_from_header(&header);
+
+        let now = time::Instant::now();
+        let info =
+            RequestInfo { ancestor_hash: CryptoHash::default(), added: now, last_requested: now };
+
+        // Receiving -> Requesting works
+        assert!(cache.start_requesting(&chunk_hash, info.clone()));
+        assert!(cache.is_requesting(&chunk_hash));
+
+        // Requesting -> Requesting doesn't overwrite
+        assert!(!cache.start_requesting(&chunk_hash, info.clone()));
+
+        // Complete -> Requesting doesn't work
+        cache.mark_complete(&chunk_hash);
+        assert!(!cache.start_requesting(&chunk_hash, info));
+    }
+
+    #[test]
+    fn test_gc_skips_requesting_chunks() {
+        let mut cache = EncodedChunksCache::new(DEFAULT_CHUNKS_CACHE_HEIGHT_HORIZON);
+        let header = create_chunk_header(1, ShardId::new(0));
+        let chunk_hash = header.chunk_hash();
+        cache.get_or_insert_from_header(&header);
+
+        let now = time::Instant::now();
+        cache.start_requesting(
+            &chunk_hash,
+            RequestInfo { ancestor_hash: CryptoHash::default(), added: now, last_requested: now },
+        );
+
+        cache.update_largest_seen_height(2000);
+        assert!(cache.get(&chunk_hash).is_some());
     }
 }
