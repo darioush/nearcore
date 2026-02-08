@@ -627,15 +627,14 @@ impl ShardsManagerActor {
             return;
         }
 
-        let targets = crate::chunk_cache::request_targets(std::time::Duration::ZERO, is_old);
         tracing::debug!(target: "chunks", height, %shard_id, ?chunk_hash, "requesting");
         let request = ChunkSendRequest {
             chunk_hash: chunk_hash.clone(),
             height,
             ancestor_hash,
             shard_id,
-            force_request_full: targets.force_request_full,
-            request_own_parts_from_others: targets.request_own_parts_from_others,
+            force_request_full: false,
+            request_own_parts_from_others: is_old,
             request_from_archival: fetch_from_archival,
         };
         self.execute_send_request(&request, me);

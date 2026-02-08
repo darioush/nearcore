@@ -168,13 +168,6 @@ pub(crate) enum ChunkState {
     Complete,
 }
 
-/// Who to send chunk requests to, based on elapsed time and staleness.
-#[derive(Clone, Debug)]
-pub(crate) struct RequestTargets {
-    pub request_own_parts_from_others: bool,
-    pub force_request_full: bool,
-}
-
 /// Metadata for an active chunk request.
 #[derive(Clone, Debug)]
 pub(crate) struct RequestInfo {
@@ -290,15 +283,17 @@ impl EncodedChunksCache {
                 entry.header.prev_block_hash(),
                 chain_header_head,
             );
-            let targets = request_targets(now - info.added, is_old);
+            let elapsed = now - info.added;
+            let request_own_parts_from_others = is_old || elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS;
+            let force_request_full = elapsed >= CHUNK_REQUEST_SWITCH_TO_FULL_FETCH;
 
             actions.push(ChunkSendRequest {
                 chunk_hash: chunk_hash.clone(),
                 height: entry.header.height_created(),
                 ancestor_hash: info.ancestor_hash,
                 shard_id: entry.header.shard_id(),
-                force_request_full: targets.force_request_full,
-                request_own_parts_from_others: targets.request_own_parts_from_others,
+                force_request_full,
+                request_own_parts_from_others,
                 request_from_archival: fetch_from_archival,
             });
         }
@@ -488,17 +483,6 @@ impl EncodedChunksCache {
             entry.ready_for_inclusion = true;
             true
         }
-    }
-}
-
-/// Determine request targets based on elapsed time and whether the chunk's block is old.
-pub(crate) fn request_targets(elapsed: std::time::Duration, is_old: bool) -> RequestTargets {
-    if elapsed >= CHUNK_REQUEST_SWITCH_TO_FULL_FETCH {
-        RequestTargets { request_own_parts_from_others: true, force_request_full: true }
-    } else if elapsed >= CHUNK_REQUEST_SWITCH_TO_OTHERS || is_old {
-        RequestTargets { request_own_parts_from_others: true, force_request_full: false }
-    } else {
-        RequestTargets { request_own_parts_from_others: false, force_request_full: false }
     }
 }
 
