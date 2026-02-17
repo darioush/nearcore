@@ -118,9 +118,9 @@ use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 use utils::{
-    average_cost, fn_cost, fn_cost_count, fn_cost_in_contract, fn_cost_with_setup,
-    generate_data_only_contract, generate_fn_name, noop_function_call_cost, read_resource,
-    transaction_cost, transaction_cost_ext,
+    aggregate_per_block_measurements, average_cost, fn_cost, fn_cost_count, fn_cost_in_contract,
+    fn_cost_with_setup, generate_data_only_contract, generate_fn_name, noop_function_call_cost,
+    overhead_per_measured_block, read_resource, transaction_cost, transaction_cost_ext,
 };
 use vm_estimator::{compile_single_contract_cost, compute_compile_cost_vm};
 
@@ -1027,108 +1027,132 @@ fn deterministic_state_init_cost(
     gas_cost
 }
 
+/// Estimate the cost of an action that requires prior state setup.
+///
+/// Processes setup blocks (unmeasured) to prepare accounts, then measures
+/// blocks of standalone transactions containing the target action.
+///
+/// `setup_actions` produces actions to run on each account before measurement.
+/// `measure_actions` produces the action(s) to measure.
+/// If `cross_shard` is true, the measurement uses sender != receiver with
+/// block_latency=1 (like Transfer). Otherwise, sender == receiver (sir).
+#[cfg(feature = "nightly")]
+fn transaction_cost_with_setup_blocks(
+    ctx: &mut EstimatorContext,
+    setup_actions: impl Fn() -> Vec<Action>,
+    measure_actions: impl Fn() -> Vec<Action>,
+    cross_shard: bool,
+) -> GasCost {
+    let block_size = 100;
+    let block_latency = if cross_shard { 1 } else { 0 };
+    let measurement_overhead = overhead_per_measured_block(ctx, block_latency);
+
+    let mut testbed = ctx.testbed();
+    let n_blocks = testbed.config.warmup_iters_per_block + testbed.config.iter_per_block;
+    let n_accounts = n_blocks * block_size;
+
+    // Collect accounts and run setup blocks.
+    let accounts: Vec<_> =
+        (0..n_accounts).map(|_| testbed.transaction_builder().random_unused_account()).collect();
+    for setup_chunk in accounts.chunks(block_size) {
+        let block: Vec<_> = setup_chunk
+            .iter()
+            .map(|account| {
+                testbed.transaction_builder().transaction_from_actions(
+                    account.clone(),
+                    account.clone(),
+                    setup_actions(),
+                )
+            })
+            .collect();
+        testbed.process_block(block, 0);
+    }
+
+    // Build and measure blocks with the target action.
+    let mut blocks = Vec::with_capacity(n_blocks);
+    let mut account_iter = accounts.iter();
+    for _ in 0..n_blocks {
+        let mut block = Vec::with_capacity(block_size);
+        for _ in 0..block_size {
+            let account = account_iter.next().unwrap().clone();
+            let (sender, receiver) = if cross_shard {
+                (testbed.transaction_builder().random_account(), account)
+            } else {
+                (account.clone(), account)
+            };
+            block.push(testbed.transaction_builder().transaction_from_actions(
+                sender,
+                receiver,
+                measure_actions(),
+            ));
+        }
+        blocks.push(block);
+    }
+
+    let measurements = testbed.measure_blocks(blocks, block_latency);
+    let measurements =
+        measurements.into_iter().skip(testbed.config.warmup_iters_per_block).collect();
+    let total_cost =
+        aggregate_per_block_measurements(block_size, measurements, Some(measurement_overhead)).0;
+    let base_cost =
+        if cross_shard { action_receipt_creation(ctx) } else { action_sir_receipt_creation(ctx) };
+    total_cost.saturating_sub(&base_cost, &NonNegativeTolerance::PER_MILLE)
+}
+
 #[cfg(feature = "nightly")]
 fn action_transfer_to_gas_key(ctx: &mut EstimatorContext) -> GasCost {
-    // Measure [AddKey + TransferToGasKey] - [AddKey] to isolate TransferToGasKey.
-    let with_transfer = {
-        let mut make_transaction = |tb: &mut TransactionBuilder| -> SignedTransaction {
-            let sender = tb.random_unused_account();
-            let receiver = sender.clone();
-            let actions = vec![
-                Action::AddKey(Box::new(AddKeyAction {
-                    public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                        .parse()
-                        .unwrap(),
-                    access_key: AccessKey::gas_key_full_access(1),
-                })),
-                Action::TransferToGasKey(Box::new(
-                    near_primitives::action::TransferToGasKeyAction {
-                        public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                            .parse()
-                            .unwrap(),
-                        deposit: Balance::from_yoctonear(1),
-                    },
-                )),
-            ];
-            tb.transaction_from_actions(sender, receiver, actions)
-        };
-        transaction_cost(ctx, &mut make_transaction)
-    };
-    let without_transfer = {
-        let mut make_transaction = |tb: &mut TransactionBuilder| -> SignedTransaction {
-            let sender = tb.random_unused_account();
-            let receiver = sender.clone();
-            let actions = vec![Action::AddKey(Box::new(AddKeyAction {
-                public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847".parse().unwrap(),
+    let gas_key_pubkey = near_crypto::PublicKey::from_seed(KeyType::ED25519, "gas-key-seed");
+    let pk = gas_key_pubkey.clone();
+    transaction_cost_with_setup_blocks(
+        ctx,
+        move || {
+            vec![Action::AddKey(Box::new(AddKeyAction {
+                public_key: pk.clone(),
                 access_key: AccessKey::gas_key_full_access(1),
-            }))];
-            tb.transaction_from_actions(sender, receiver, actions)
-        };
-        transaction_cost(ctx, &mut make_transaction)
-    };
-    with_transfer.saturating_sub(&without_transfer, &NonNegativeTolerance::PER_MILLE)
+            }))]
+        },
+        move || {
+            vec![Action::TransferToGasKey(Box::new(
+                near_primitives::action::TransferToGasKeyAction {
+                    public_key: gas_key_pubkey.clone(),
+                    deposit: Balance::from_yoctonear(1),
+                },
+            ))]
+        },
+        true, // cross-shard, like Transfer
+    )
 }
 
 #[cfg(feature = "nightly")]
 fn action_withdraw_from_gas_key(ctx: &mut EstimatorContext) -> GasCost {
-    // Measure [AddKey + Transfer + Withdraw] - [AddKey + Transfer] to isolate WithdrawFromGasKey.
-    let with_withdraw = {
-        let mut make_transaction = |tb: &mut TransactionBuilder| -> SignedTransaction {
-            let sender = tb.random_unused_account();
-            let receiver = sender.clone();
-            let actions = vec![
+    let gas_key_pubkey = near_crypto::PublicKey::from_seed(KeyType::ED25519, "gas-key-seed");
+    let pk = gas_key_pubkey.clone();
+    transaction_cost_with_setup_blocks(
+        ctx,
+        move || {
+            vec![
                 Action::AddKey(Box::new(AddKeyAction {
-                    public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                        .parse()
-                        .unwrap(),
+                    public_key: pk.clone(),
                     access_key: AccessKey::gas_key_full_access(1),
                 })),
                 Action::TransferToGasKey(Box::new(
                     near_primitives::action::TransferToGasKeyAction {
-                        public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                            .parse()
-                            .unwrap(),
+                        public_key: pk.clone(),
                         deposit: Balance::from_near(1),
                     },
                 )),
-                Action::WithdrawFromGasKey(Box::new(
-                    near_primitives::action::WithdrawFromGasKeyAction {
-                        public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                            .parse()
-                            .unwrap(),
-                        amount: Balance::from_yoctonear(1),
-                    },
-                )),
-            ];
-            tb.transaction_from_actions(sender, receiver, actions)
-        };
-        transaction_cost(ctx, &mut make_transaction)
-    };
-    let without_withdraw = {
-        let mut make_transaction = |tb: &mut TransactionBuilder| -> SignedTransaction {
-            let sender = tb.random_unused_account();
-            let receiver = sender.clone();
-            let actions = vec![
-                Action::AddKey(Box::new(AddKeyAction {
-                    public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                        .parse()
-                        .unwrap(),
-                    access_key: AccessKey::gas_key_full_access(1),
-                })),
-                Action::TransferToGasKey(Box::new(
-                    near_primitives::action::TransferToGasKeyAction {
-                        public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
-                            .parse()
-                            .unwrap(),
-                        deposit: Balance::from_near(1),
-                    },
-                )),
-            ];
-            tb.transaction_from_actions(sender, receiver, actions)
-        };
-        transaction_cost(ctx, &mut make_transaction)
-    };
-    with_withdraw.saturating_sub(&without_withdraw, &NonNegativeTolerance::PER_MILLE)
+            ]
+        },
+        move || {
+            vec![Action::WithdrawFromGasKey(Box::new(
+                near_primitives::action::WithdrawFromGasKeyAction {
+                    public_key: gas_key_pubkey.clone(),
+                    amount: Balance::from_yoctonear(1),
+                },
+            ))]
+        },
+        false, // sir, withdraw from own gas key
+    )
 }
 
 #[cfg(feature = "nightly")]
@@ -1141,7 +1165,7 @@ fn action_add_gas_key_per_nonce(ctx: &mut EstimatorContext) -> GasCost {
             let sender = tb.random_unused_account();
             let receiver = sender.clone();
             let actions = vec![Action::AddKey(Box::new(AddKeyAction {
-                public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847".parse().unwrap(),
+                public_key: near_crypto::PublicKey::from_seed(KeyType::ED25519, "gas-key-seed"),
                 access_key: AccessKey::gas_key_full_access(n),
             }))];
             tb.transaction_from_actions(sender, receiver, actions)
@@ -1154,7 +1178,7 @@ fn action_add_gas_key_per_nonce(ctx: &mut EstimatorContext) -> GasCost {
             let sender = tb.random_unused_account();
             let receiver = sender.clone();
             let actions = vec![Action::AddKey(Box::new(AddKeyAction {
-                public_key: "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847".parse().unwrap(),
+                public_key: near_crypto::PublicKey::from_seed(KeyType::ED25519, "gas-key-seed"),
                 access_key: AccessKey::gas_key_full_access(n),
             }))];
             tb.transaction_from_actions(sender, receiver, actions)
