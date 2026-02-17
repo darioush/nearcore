@@ -187,10 +187,14 @@ impl GenesisBuilder {
             "[elapsed {elapsed_precise} remaining {eta_precise}] Writing into storage {bar} {pos:>7}/{len:7}",
         ).unwrap());
         // Add records in chunks of 3000 per shard for memory efficiency reasons.
+        let log_interval = std::cmp::max(total_accounts_num / 10, 1);
         for i in 0..total_accounts_num {
             let account_id = get_account_id(i);
             self.add_additional_account(account_id)?;
             bar.inc(1);
+            if (i + 1) % log_interval == 0 {
+                eprintln!("  added {} / {} accounts", i + 1, total_accounts_num);
+            }
         }
 
         for shard_id in shard_ids {
