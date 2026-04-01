@@ -166,6 +166,7 @@ pub fn compile_in_subprocess(
         max_elements_per_contract_table: limit_config
             .max_elements_per_contract_table
             .map(|v| v as u64),
+        use_winch: false,
     };
 
     let mut state = get_or_init_state().lock().unwrap();
@@ -179,6 +180,7 @@ pub fn benchmark_in_subprocess(
     binary: &Path,
     daemon_slot: &mut Option<DaemonProcess>,
     cold: bool,
+    use_winch: bool,
     prepared_code: &[u8],
     limit_config: &LimitConfig,
 ) -> Result<BenchmarkResponse, String> {
@@ -189,6 +191,7 @@ pub fn benchmark_in_subprocess(
         max_elements_per_contract_table: limit_config
             .max_elements_per_contract_table
             .map(|v| v as u64),
+        use_winch,
     };
     if daemon_slot.as_mut().and_then(|d| (!d.is_alive()).then(|| ())).is_some() {
         *daemon_slot = None;

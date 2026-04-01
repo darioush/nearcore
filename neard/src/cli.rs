@@ -258,6 +258,7 @@ impl BenchmarkCompileCmd {
                 &binary,
                 &mut daemon_slot,
                 self.cold,
+                self.winch,
                 &prepared_code,
                 &vm_config.limit_config,
             ) {
@@ -443,6 +444,9 @@ pub(super) struct BenchmarkCompileCmd {
     /// Spawn a fresh daemon per contract (cold engine). Default reuses one daemon.
     #[clap(long)]
     cold: bool,
+    /// Use Winch (non-optimizing) backend instead of Cranelift.
+    #[clap(long)]
+    winch: bool,
 }
 
 #[allow(unused)]

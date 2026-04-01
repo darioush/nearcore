@@ -124,6 +124,31 @@ pub(crate) fn create_compiler_engine(max_memory_pages: u32) -> anyhow::Result<En
     Engine::new(&config)
 }
 
+/// Create a wasmtime Engine using the Winch (non-optimizing) backend.
+/// Winch is a single-pass compiler that compiles much faster than Cranelift
+/// but produces slower code.
+#[cfg(feature = "winch")]
+pub(crate) fn create_winch_engine(max_memory_pages: u32) -> anyhow::Result<Engine> {
+    let max_memory_size = guest_memory_size(max_memory_pages).unwrap_or(usize::MAX);
+    let mut config = wasmtime::Config::default();
+    config
+        .native_unwind_info(false)
+        .wasm_backtrace(false)
+        .wasm_backtrace_details(WasmBacktraceDetails::Disable)
+        .memory_init_cow(true)
+        .max_wasm_stack(1024 * 1024 * 1024)
+        .strategy(Strategy::Winch)
+        .signals_based_traps(true)
+        .memory_guaranteed_dense_image_size(max_memory_size.try_into().unwrap_or(u64::MAX))
+        .guard_before_linear_memory(false)
+        .memory_guard_size(0)
+        .memory_may_move(false)
+        .memory_reservation(max_memory_size.try_into().unwrap_or(u64::MAX))
+        .memory_reservation_for_growth(0)
+        .wasm_wide_arithmetic(true);
+    Engine::new(&config)
+}
+
 struct InstancePermit<'a> {
     instances: &'a AtomicU64,
     tables: &'a AtomicU64,

@@ -71,6 +71,9 @@ fn handle_benchmark(
     engines: &mut HashMap<u32, wasmtime::Engine>,
     request: CompileRequest,
 ) -> BenchmarkResponse {
+    if request.use_winch {
+        return handle_benchmark_winch(&request);
+    }
     let engine = match get_or_create_engine(engines, request.max_memory_pages) {
         Ok(e) => e,
         Err(msg) => {
@@ -89,6 +92,37 @@ fn handle_benchmark(
         result: result.map_err(|e| e.to_string()),
         compile_time_nanos,
         peak_rss_bytes,
+    }
+}
+
+fn handle_benchmark_winch(request: &CompileRequest) -> BenchmarkResponse {
+    #[cfg(feature = "winch")]
+    {
+        let engine = match crate::wasmtime_runner::create_winch_engine(request.max_memory_pages) {
+            Ok(e) => e,
+            Err(e) => {
+                return BenchmarkResponse {
+                    result: Err(format!("failed to create winch engine: {e}")),
+                    compile_time_nanos: 0,
+                    peak_rss_bytes: 0,
+                };
+            }
+        };
+        let start = std::time::Instant::now();
+        let result = engine.precompile_module(&request.prepared_code);
+        let compile_time_nanos = start.elapsed().as_nanos() as u64;
+        let peak_rss_bytes = get_peak_rss();
+        BenchmarkResponse {
+            result: result.map_err(|e| e.to_string()),
+            compile_time_nanos,
+            peak_rss_bytes,
+        }
+    }
+    #[cfg(not(feature = "winch"))]
+    BenchmarkResponse {
+        result: Err("winch feature not enabled".to_string()),
+        compile_time_nanos: 0,
+        peak_rss_bytes: 0,
     }
 }
 

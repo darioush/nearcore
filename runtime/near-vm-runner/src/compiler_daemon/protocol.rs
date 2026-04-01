@@ -9,6 +9,8 @@ pub struct CompileRequest {
     pub max_memory_pages: u32,
     pub max_tables_per_contract: Option<u32>,
     pub max_elements_per_contract_table: Option<u64>,
+    /// If true, use Winch (non-optimizing) backend instead of Cranelift.
+    pub use_winch: bool,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
