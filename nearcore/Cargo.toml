@@ -92,6 +92,7 @@ harness = false
 
 [features]
 default = ["json_rpc", "rosetta_rpc"]
+winch = ["near-vm-runner/winch"]
 
 test_features = [
     "near-client/test_features",

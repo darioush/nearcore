@@ -66,6 +66,7 @@ rustc_version = "0.4"
 rpc_probe = ["nearcore/rpc_probe"]
 tx_generator = ["nearcore/tx_generator"]
 default = ["json_rpc", "rosetta_rpc", "dump-test-contract"]
+winch = ["nearcore/winch"]
 protocol_feature_spice = [
   "near-client/protocol_feature_spice",
   "near-primitives/protocol_feature_spice",
