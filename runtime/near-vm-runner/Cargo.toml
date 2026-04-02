@@ -67,6 +67,7 @@ near-vm-vm = { workspace = true, optional = true }
 
 [dev-dependencies]
 arbitrary.workspace = true
+tikv-jemallocator = { workspace = true, features = ["profiling"] }
 ark-bls12-381.workspace = true
 ark-ec.workspace = true
 ark-ff.workspace = true

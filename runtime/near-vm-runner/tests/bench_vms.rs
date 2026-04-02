@@ -6,6 +6,9 @@
 //!
 //! If no arguments are given, compiles a small default contract.
 
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use near_parameters::vm::VMKind;
 use near_vm_runner::{ContractCode, MockContractRuntimeCache, precompile_contract};
 use std::sync::Arc;

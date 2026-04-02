@@ -5441,6 +5441,7 @@ dependencies = [
  "strum",
  "tempfile",
  "thiserror 2.0.16",
+ "tikv-jemallocator",
  "tracing",
  "wasm-encoder 0.236.0",
  "wasm-smith",
