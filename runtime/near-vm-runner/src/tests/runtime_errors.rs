@@ -483,6 +483,7 @@ fn test_table_grow_1_element_gas_winch() {
         .gas(Gas::from_gigagas(10))
         .expect(&expect![[r#"
             VMOutcome: balance 4 storage_usage 12 return data None burnt gas 89910713 used gas 89910713
+            Err: Wasmtime compilation error: failed to compile: wasm[0]::function[3]
         "#]]);
 }
 
