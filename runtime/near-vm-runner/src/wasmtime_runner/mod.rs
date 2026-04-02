@@ -425,8 +425,19 @@ impl WasmtimeVM {
                 .memory_init_cow(true)
                 // Wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
                 .max_wasm_stack(1024 * 1024 * 1024)
-                // Enable the Cranelift optimizing compiler.
-                .strategy(Strategy::Cranelift)
+                .strategy({
+                    #[cfg(feature = "test_features")]
+                    if let Some(s) = config.wasmtime_strategy {
+                        match s {
+                            near_parameters::vm::WasmtimeStrategy::Cranelift => Strategy::Cranelift,
+                            near_parameters::vm::WasmtimeStrategy::Winch => Strategy::Winch,
+                        }
+                    } else {
+                        Strategy::Cranelift
+                    }
+                    #[cfg(not(feature = "test_features"))]
+                    Strategy::Cranelift
+                })
                 // Enable signals-based traps. This is required to elide explicit bounds-checking.
                 .signals_based_traps(true)
                 // Configure linear memories such that explicit bounds-checking can be elided.

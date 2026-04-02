@@ -115,7 +115,7 @@ nightly = [
     "near-primitives-core/nightly",
 ]
 sandbox = ["near-o11y/sandbox"]
-test_features = []
+test_features = ["near-parameters/test_features"]
 protocol_schema = [
     "near-crypto/protocol_schema",
     "near-parameters/protocol_schema",

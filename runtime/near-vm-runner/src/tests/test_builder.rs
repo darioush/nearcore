@@ -46,6 +46,8 @@ pub(crate) fn test_builder() -> TestBuilder {
         opaque_outcome: false,
         method: "main".into(),
         max_gas_burnt: None,
+        #[cfg(feature = "test_features")]
+        wasmtime_strategy: None,
     }
 }
 
@@ -58,6 +60,8 @@ pub(crate) struct TestBuilder {
     opaque_outcome: bool,
     method: String,
     max_gas_burnt: Option<Gas>,
+    #[cfg(feature = "test_features")]
+    wasmtime_strategy: Option<near_parameters::vm::WasmtimeStrategy>,
 }
 
 impl TestBuilder {
@@ -123,6 +127,13 @@ impl TestBuilder {
     #[allow(dead_code)]
     pub(crate) fn only_near_vm(self) -> Self {
         self.skip_wasmtime()
+    }
+
+    #[allow(dead_code)]
+    #[cfg(feature = "test_features")]
+    pub(crate) fn only_winch(mut self) -> Self {
+        self.wasmtime_strategy = Some(near_parameters::vm::WasmtimeStrategy::Winch);
+        self.skip_near_vm()
     }
 
     /// Add additional protocol features to this test.
@@ -204,6 +215,10 @@ impl TestBuilder {
                 let config =
                     Arc::get_mut(&mut Arc::get_mut(runtime_config).unwrap().wasm_config).unwrap();
                 config.vm_kind = vm_kind;
+                #[cfg(feature = "test_features")]
+                {
+                    config.wasmtime_strategy = self.wasmtime_strategy;
+                }
                 if let Some(max_gas_burnt) = self.max_gas_burnt {
                     config.limit_config.max_gas_burnt = max_gas_burnt;
                 }

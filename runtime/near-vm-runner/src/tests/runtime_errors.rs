@@ -467,6 +467,28 @@ fn test_table_grow_1_element_gas() {
 }
 
 #[test]
+#[cfg(feature = "test_features")]
+fn test_table_grow_1_element_gas_winch() {
+    test_builder()
+        .only_winch()
+        .wat(
+            r#"
+(module
+  (table 1 128 funcref)
+  (func (export "main")
+    (drop (table.grow (ref.null func) (i32.const 1)))
+  )
+)"#,
+        )
+        .gas(Gas::from_gigagas(10))
+        .opaque_error()
+        .expect(&expect![[r#"
+            VMOutcome: balance 4 storage_usage 12 return data None burnt gas 0 used gas 0
+            Err: ...
+        "#]]);
+}
+
+#[test]
 fn test_table_grow_10_elements_gas() {
     test_builder()
         .only_wasmtime()

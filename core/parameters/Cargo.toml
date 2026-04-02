@@ -46,3 +46,4 @@ schemars = [
   "dep:schemars",
   "near-primitives-core/schemars",
 ]
+test_features = []

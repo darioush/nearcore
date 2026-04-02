@@ -207,6 +207,18 @@ pub struct Config {
 
     /// Describes limits for VM and Runtime.
     pub limit_config: LimitConfig,
+
+    /// Override the wasmtime compiler strategy. Only used for testing.
+    #[cfg(feature = "test_features")]
+    pub wasmtime_strategy: Option<WasmtimeStrategy>,
+}
+
+/// Wasmtime compiler strategy selection.
+#[cfg(feature = "test_features")]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum WasmtimeStrategy {
+    Cranelift,
+    Winch,
 }
 
 impl Config {
