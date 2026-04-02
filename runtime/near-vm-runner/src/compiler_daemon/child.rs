@@ -9,13 +9,9 @@ use super::protocol::{
 use crate::wasmtime_runner::create_compiler_engine;
 use std::collections::{HashMap, hash_map};
 
-const MEMORY_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
 /// Entry point for the compiler daemon subprocess.
 /// Called when the binary is invoked with the `compile-wasm` argument.
 pub fn daemon_main() -> ! {
-    set_memory_limit();
-
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = stdin.lock();
@@ -155,17 +151,3 @@ fn get_peak_rss() -> u64 {
 fn get_peak_rss() -> u64 {
     0
 }
-
-#[cfg(unix)]
-fn set_memory_limit() {
-    let ret = unsafe {
-        let limit = libc::rlimit { rlim_cur: MEMORY_LIMIT_BYTES, rlim_max: MEMORY_LIMIT_BYTES };
-        libc::setrlimit(libc::RLIMIT_AS, &limit)
-    };
-    if ret != 0 {
-        eprintln!("warning: failed to set memory limit: {}", std::io::Error::last_os_error());
-    }
-}
-
-#[cfg(not(unix))]
-fn set_memory_limit() {}
