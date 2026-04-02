@@ -7,7 +7,6 @@ use super::protocol::{
     BenchmarkResponse, CompileRequest, CompileResponse, RequestKind, read_frame, write_frame,
 };
 use crate::wasmtime_runner::create_compiler_engine;
-use std::collections::{HashMap, hash_map};
 
 /// Entry point for the compiler daemon subprocess.
 /// Called when the binary is invoked with the `compile-wasm` argument.
@@ -16,7 +15,6 @@ pub fn daemon_main() -> ! {
     let stdout = std::io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    let mut engines: HashMap<u32, wasmtime::Engine> = HashMap::new();
 
     loop {
         let frame = match read_frame(&mut reader) {
@@ -34,13 +32,13 @@ pub fn daemon_main() -> ! {
         };
         match kind {
             RequestKind::Compile => {
-                let response = handle_compile(&mut engines, request);
+                let response = handle_compile(request);
                 if write_frame(&mut writer, &borsh::to_vec(&response).unwrap()).is_err() {
                     std::process::exit(0);
                 }
             }
             RequestKind::Benchmark => {
-                let response = handle_benchmark(&mut engines, request);
+                let response = handle_benchmark(request);
                 if write_frame(&mut writer, &borsh::to_vec(&response).unwrap()).is_err() {
                     std::process::exit(0);
                 }
@@ -49,13 +47,10 @@ pub fn daemon_main() -> ! {
     }
 }
 
-fn handle_compile(
-    engines: &mut HashMap<u32, wasmtime::Engine>,
-    request: CompileRequest,
-) -> CompileResponse {
-    let engine = match get_or_create_engine(engines, request.max_memory_pages) {
+fn handle_compile(request: CompileRequest) -> CompileResponse {
+    let engine = match create_compiler_engine(request.max_memory_pages) {
         Ok(e) => e,
-        Err(msg) => return CompileResponse::Err(msg),
+        Err(e) => return CompileResponse::Err(format!("failed to create engine: {e}")),
     };
     match engine.precompile_module(&request.prepared_code) {
         Ok(bytes) => CompileResponse::Ok(bytes),
@@ -63,18 +58,15 @@ fn handle_compile(
     }
 }
 
-fn handle_benchmark(
-    engines: &mut HashMap<u32, wasmtime::Engine>,
-    request: CompileRequest,
-) -> BenchmarkResponse {
+fn handle_benchmark(request: CompileRequest) -> BenchmarkResponse {
     if request.use_winch {
         return handle_benchmark_winch(&request);
     }
-    let engine = match get_or_create_engine(engines, request.max_memory_pages) {
+    let engine = match create_compiler_engine(request.max_memory_pages) {
         Ok(e) => e,
-        Err(msg) => {
+        Err(e) => {
             return BenchmarkResponse {
-                result: Err(msg),
+                result: Err(format!("failed to create engine: {e}")),
                 compile_time_nanos: 0,
                 peak_rss_bytes: 0,
             };
@@ -119,19 +111,6 @@ fn handle_benchmark_winch(request: &CompileRequest) -> BenchmarkResponse {
         result: Err("winch feature not enabled".to_string()),
         compile_time_nanos: 0,
         peak_rss_bytes: 0,
-    }
-}
-
-fn get_or_create_engine(
-    engines: &mut HashMap<u32, wasmtime::Engine>,
-    max_memory_pages: u32,
-) -> Result<&mut wasmtime::Engine, String> {
-    match engines.entry(max_memory_pages) {
-        hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
-        hash_map::Entry::Vacant(e) => match create_compiler_engine(max_memory_pages) {
-            Ok(engine) => Ok(e.insert(engine)),
-            Err(e) => Err(format!("failed to create engine: {e}")),
-        },
     }
 }
 
