@@ -230,14 +230,15 @@ impl ReplayController {
         let prev_chunk_headers = self.epoch_manager.get_prev_chunk_headers(&prev_block)?;
 
         let chunks = block.chunks();
+        let epoch_id = block.header().epoch_id();
+        let shard_layout = self.epoch_manager.get_shard_layout(epoch_id)?;
+        let shard_ids: Vec<ShardId> = shard_layout.shard_ids().collect();
         let mut total_gas_burnt = Gas::ZERO;
         // TODO: Parallelize this loop.
-        for shard_id in 0..chunks.len() {
-            let chunk_header = &chunks[shard_id];
-            let prev_chunk_header = &prev_chunk_headers[shard_id];
-            let epoch_id = block.header().epoch_id();
-            let shard_id: ShardId = shard_id.try_into()?;
-            let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, epoch_id)
+        for (idx, shard_id) in shard_ids.iter().enumerate() {
+            let chunk_header = &chunks[idx];
+            let prev_chunk_header = &prev_chunk_headers[idx];
+            let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), *shard_id, epoch_id)
                 .context("Failed to get shard UID from shard id")?;
             let replay_output = self
                 .replay_chunk(&block, &prev_block, shard_uid, chunk_header, prev_chunk_header)
@@ -250,7 +251,7 @@ impl ReplayController {
             store_update.save_chunk_extra(&block_hash, &shard_uid, replay_output.chunk_extra);
             store_update.save_outgoing_receipt(
                 &block_hash,
-                shard_id,
+                *shard_id,
                 replay_output.outgoing_receipts,
             );
             let _ = store_update.commit()?;
