@@ -51,6 +51,11 @@ impl ReplayDB {
         }
     }
 
+    /// Read from write_db first, fall back to split_db if not found.
+    fn read_with_fallback(&self, col: DBCol, key: &[u8]) -> Option<DBSlice<'_>> {
+        self.write_db.get_raw_bytes(col, key).or_else(|| self.split_db.get_raw_bytes(col, key))
+    }
+
     /// Returns the set of columns read from the store since its creation.
     pub fn get_columns_read(&self) -> HashSet<DBCol> {
         self.columns_read.lock().clone()
@@ -65,7 +70,11 @@ impl ReplayDB {
 impl Database for ReplayDB {
     fn get_raw_bytes(&self, col: DBCol, key: &[u8]) -> Option<DBSlice<'_>> {
         self.columns_read.lock().insert(col);
-        self.read_db(col).get_raw_bytes(col, key)
+        if self.archival_columns.contains(&col) {
+            self.split_db.get_raw_bytes(col, key)
+        } else {
+            self.read_with_fallback(col, key)
+        }
     }
 
     fn get_with_rc_stripped(&self, col: DBCol, key: &[u8]) -> Option<DBSlice<'_>> {
