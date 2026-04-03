@@ -161,6 +161,10 @@ pub(crate) fn open_storage_for_replay(
         DBCol::BlockHeader,
         DBCol::State,
         DBCol::Block,
+        DBCol::EpochInfo,
+        DBCol::BlockInfo,
+        DBCol::EpochStart,
+        DBCol::EpochValidatorInfo,
     ]);
 
     let opener = NodeStorage::opener(
