@@ -3,7 +3,7 @@ use itertools::Itertools;
 use near_store::db::{
     DBIterator, DBSlice, DBTransaction, Database, SplitDB, StoreStatistics, TestDB,
 };
-use near_store::{DBCol, Mode, NodeStorage};
+use near_store::{DBCol, Mode, NodeStorage, StoreConfig};
 use nearcore::NearConfig;
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -131,6 +131,25 @@ impl Database for ReplayDB {
     }
 }
 
+/// Opens a RocksDB in read-write mode to create any missing column families
+/// and bump the DB version to the expected value. This bypasses nearcore's
+/// migration logic which is not needed for replay.
+fn ensure_column_families(store_config: &StoreConfig, home_dir: &Path) -> anyhow::Result<()> {
+    use near_store::db::rocksdb::RocksDB;
+    use near_store::db::{DBTransaction, Database};
+    use near_store::Temperature;
+    let path = home_dir.join(store_config.path.as_deref().unwrap_or(Path::new("")));
+    let db = RocksDB::open(&path, store_config, Mode::ReadWriteExisting, Temperature::Hot)
+        .context("failed to open db in read-write mode to create column families")?;
+    // Bump the version so the read-only opener accepts this DB.
+    let expected = near_store::db::metadata::DB_VERSION;
+    let mut tx = DBTransaction::new();
+    tx.set(DBCol::DbVersion, b"VERSION".to_vec(), expected.to_string().into_bytes());
+    db.write(tx);
+    tracing::info!(target: "replay-archive", ?path, version = expected, "updated db version and column families");
+    Ok(())
+}
+
 pub(crate) fn open_storage_for_replay(
     home_dir: &Path,
     near_config: &NearConfig,
@@ -150,7 +169,20 @@ pub(crate) fn open_storage_for_replay(
         near_config.config.cold_store.as_ref(),
         near_config.cloud_storage_context(),
     );
-    let split_storage = opener.open_in_mode(Mode::ReadOnly).context("Failed to open storage")?;
+    // Try read-only first; if it fails (e.g. missing column families from a
+    // newer DB schema), open the raw RocksDB in read-write mode briefly to
+    // create them, bypassing the version/migration checks.
+    let split_storage = match opener.open_in_mode(Mode::ReadOnly) {
+        Ok(storage) => storage,
+        Err(e) => {
+            tracing::warn!(target: "replay-archive", "read-only open failed ({e:#}), creating missing column families");
+            ensure_column_families(&near_config.config.store, home_dir)?;
+            if let Some(cold_config) = &near_config.config.cold_store {
+                ensure_column_families(cold_config, home_dir)?;
+            }
+            opener.open_in_mode(Mode::ReadOnly).context("Failed to reopen storage in read-only mode")?
+        }
+    };
     match split_storage.get_split_db() {
         Some(split_db) => Ok(ReplayDB::new(split_db, archival_columns)),
         None => Err(anyhow!("Failed to get split store for archival node")),
