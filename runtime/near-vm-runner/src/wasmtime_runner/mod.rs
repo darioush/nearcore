@@ -441,6 +441,7 @@ impl WasmtimeVM {
                 .memory_reservation_for_growth(0)
                 .compiler_inlining(true)
                 .cranelift_nan_canonicalization(true)
+                .cranelift_opt_level(wasmtime::OptLevel::None)
                 .wasm_wide_arithmetic(true);
 
             let config = Arc::clone(&vm_key.config);
