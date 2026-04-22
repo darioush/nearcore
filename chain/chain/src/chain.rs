@@ -1951,7 +1951,13 @@ impl Chain {
         }
 
         if self.epoch_manager.is_next_block_epoch_start(block.header().prev_hash())? {
-            self.maybe_start_memtrie_preload_for_resharding(&block)?;
+            crate::resharding::preload::maybe_start_memtrie_preload_for_resharding(
+                self.epoch_manager.as_ref(),
+                &self.shard_tracker,
+                &self.runtime_adapter.get_tries(),
+                &*self.memtrie_loading_spawner,
+                &block,
+            )?;
             // Keep in memory only these tries that we care about this or next epoch.
             self.runtime_adapter.get_tries().retain_memtries(&shards_cares_this_or_next_epoch);
         }
@@ -2178,41 +2184,6 @@ impl Chain {
             return Ok(None);
         }
         Ok(Some(new_flat_head))
-    }
-
-    /// If a resharding is upcoming (current epoch's shard layout differs from
-    /// the next epoch), start loading the parent shard's memtrie in a background
-    /// thread so it's ready by the time resharding executes.
-    fn maybe_start_memtrie_preload_for_resharding(&self, block: &Block) -> Result<(), Error> {
-        let Some(parent_shard_uid) = self
-            .epoch_manager
-            .get_resharding_parent_shard_uid(block.header().epoch_id(), block.hash())?
-        else {
-            return Ok(());
-        };
-
-        if !self.shard_tracker.cares_about_shard_this_or_next_epoch(
-            block.header().prev_hash(),
-            parent_shard_uid.shard_id(),
-        ) {
-            return Ok(());
-        }
-
-        let tries = self.runtime_adapter.get_tries();
-        if tries.get_memtries(parent_shard_uid).is_some() {
-            return Ok(());
-        }
-
-        tracing::info!(
-            target: "memtrie",
-            ?parent_shard_uid,
-            "detected upcoming resharding, starting background memtrie load"
-        );
-        tries.spawn_background_memtrie_loading_for_shard(
-            parent_shard_uid,
-            &*self.memtrie_loading_spawner,
-        );
-        Ok(())
     }
 
     /// Update flat storage and memtrie for given `shard_id` and newly
