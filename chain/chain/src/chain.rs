@@ -1908,6 +1908,8 @@ impl Chain {
         self.runtime_adapter.get_tries().try_finalize_background_memtrie_loading();
 
         let epoch_id = block.header().epoch_id();
+        let protocol_version = self.epoch_manager.get_epoch_protocol_version(epoch_id)?;
+        let is_spice = ProtocolFeature::Spice.enabled(protocol_version);
         let mut shards_cares_this_or_next_epoch = vec![];
         for shard_id in self.epoch_manager.shard_ids(epoch_id)? {
             let cares_about_shard =
@@ -1931,7 +1933,7 @@ impl Chain {
             };
             tracing::debug!(target: "chain", %shard_id, need_storage_update);
 
-            if need_storage_update {
+            if need_storage_update && !is_spice {
                 self.resharding_manager.start_resharding(
                     self.chain_store.store_update(),
                     &block,
@@ -1950,7 +1952,7 @@ impl Chain {
             }
         }
 
-        if self.epoch_manager.is_next_block_epoch_start(block.header().prev_hash())? {
+        if !is_spice && self.epoch_manager.is_next_block_epoch_start(block.header().prev_hash())? {
             crate::resharding::preload::maybe_start_memtrie_preload_for_resharding(
                 self.epoch_manager.as_ref(),
                 &self.shard_tracker,
@@ -2870,10 +2872,13 @@ impl Chain {
         chain_update.commit()?;
 
         let epoch_id = block.header().epoch_id();
+        let protocol_version = self.epoch_manager.get_epoch_protocol_version(epoch_id)?;
+        let is_spice = ProtocolFeature::Spice.enabled(protocol_version);
         for shard_id in self.epoch_manager.shard_ids(epoch_id)? {
             // Update flat storage for each shard being caught up. We catch up a shard if it is tracked in the next
             // epoch. If it is tracked in this epoch as well, it was updated during regular block processing.
-            if !self.shard_tracker.cares_about_shard(block.header().prev_hash(), shard_id)
+            if !is_spice
+                && !self.shard_tracker.cares_about_shard(block.header().prev_hash(), shard_id)
                 && self.shard_tracker.will_care_about_shard(block.header().prev_hash(), shard_id)
             {
                 let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, epoch_id)?;
