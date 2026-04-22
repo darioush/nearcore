@@ -497,7 +497,7 @@ impl ProtocolFeature {
             // that always enables this for mocknet (see config_mocknet function).
             ProtocolFeature::ShuffleShardAssignments => 143,
             ProtocolFeature::GasKeys => 149,
-            ProtocolFeature::DynamicResharding => 150,
+            ProtocolFeature::DynamicResharding => 220,
             ProtocolFeature::StrictNonce => 151,
             ProtocolFeature::EarlyKickout => 152,
 
