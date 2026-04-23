@@ -10,6 +10,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::shard_layout::ShardLayout;
 use near_primitives::state::FlatStateValue;
 use near_primitives::types::{AccountId, EpochId, NumShards};
+use near_primitives::version::ProtocolFeature;
 use near_store::adapter::StoreAdapter;
 use near_store::adapter::trie_store::get_shard_uid_mapping;
 use near_store::db::refcount::decode_value_with_rc;
@@ -132,7 +133,22 @@ impl TrieSanityCheck {
             if head.epoch_id == EpochId::default() {
                 continue;
             }
-            let final_head = client.chain.final_head().unwrap();
+            // Under SPICE, consensus-final can be ahead of execution-final, so
+            // `final_head.prev_block_hash` may not have a ChunkExtra yet.
+            // Use the execution-final head instead, which the executor has
+            // already applied.
+            let protocol_version =
+                client.epoch_manager.get_epoch_protocol_version(&head.epoch_id).unwrap();
+            let final_head = if ProtocolFeature::Spice.enabled(protocol_version) {
+                client.chain.chain_store.spice_final_execution_head().unwrap()
+            } else {
+                client.chain.final_head().unwrap()
+            };
+            if final_head.epoch_id == EpochId::default() {
+                // Under SPICE, execution head starts at genesis and only
+                // advances once the executor has applied blocks.
+                continue;
+            }
             // At the end of an epoch, we unload memtries for shards we'll no longer track. Also,
             // the key/value equality comparison in assert_state_equal() is only guaranteed for
             // final blocks. So these two together mean that we should only check this when the head
