@@ -20,6 +20,7 @@ use time::Duration;
 /// Dedicated actor for resharding V3.
 pub struct ReshardingActor {
     chain_store: ChainStoreAdapter,
+    epoch_manager: Arc<dyn EpochManagerAdapter>,
     /// HashMap storing all scheduled resharding events. Typically there will be only
     /// one event per parent shard, but we keep it as a HashMap to allow for
     /// handling forks in the chain.
@@ -73,7 +74,7 @@ impl ReshardingActor {
     ) -> Self {
         let chain_store = runtime_adapter.store().chain_store();
         let flat_storage_resharder = FlatStorageResharder::new(
-            epoch_manager,
+            epoch_manager.clone(),
             runtime_adapter.clone(),
             resharding_handle.clone(),
             resharding_config.clone(),
@@ -86,6 +87,7 @@ impl ReshardingActor {
         );
         Self {
             chain_store,
+            epoch_manager,
             resharding_events: HashMap::new(),
             resharding_started: HashSet::new(),
             flat_storage_resharder,
@@ -192,10 +194,29 @@ impl ReshardingActor {
 
         let events = self.resharding_events.get(&parent_shard_uid).unwrap();
 
-        let chain_final_height = self.chain_store.final_head().unwrap().height;
         for event in events {
+            // Pick the right finality source. Under SPICE, the disk phase reads the
+            // parent's post-execution state, so we must wait for the executor to
+            // have applied the resharding block — not just consensus to have
+            // finalized it.
+            let is_spice = match self.epoch_manager.get_epoch_id(&event.resharding_block.hash) {
+                Ok(epoch_id) => match self.epoch_manager.get_epoch_protocol_version(&epoch_id) {
+                    Ok(protocol_version) => {
+                        near_primitives::version::ProtocolFeature::Spice.enabled(protocol_version)
+                    }
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            };
+            let chain_final_height = if is_spice {
+                self.chain_store.spice_final_execution_head().unwrap().height
+            } else {
+                self.chain_store.final_head().unwrap().height
+            };
+
             tracing::info!(
                 %chain_final_height,
+                %is_spice,
                 resharding_block = ?event.resharding_block,
                 "get_resharding_scheduling_status: head height and resharding_block"
             );
