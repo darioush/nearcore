@@ -1,4 +1,5 @@
 use crate::chain::{NewChunkData, NewChunkResult, ShardContext, StorageContext, apply_new_chunk};
+use crate::resharding::event_type::{ReshardingEventType, ReshardingSplitShardParams};
 use crate::sharding::{get_receipts_shuffle_salt, shuffle_receipt_proofs};
 use crate::spice_chunk_application::build_spice_apply_chunk_block_context;
 use crate::store::filter_incoming_receipts_for_shard;
@@ -15,11 +16,15 @@ use near_primitives::merkle::merklize;
 use near_primitives::receipt::Receipt;
 use near_primitives::shard_layout::ShardLayout;
 use near_primitives::sharding::ReceiptProof;
-use near_primitives::stateless_validation::spice_state_witness::SpiceChunkStateWitness;
+use near_primitives::stateless_validation::spice_state_witness::{
+    SpiceChunkStateTransition, SpiceChunkStateWitness,
+};
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::validator_stake::ValidatorStake;
 use near_primitives::types::{BlockExecutionResults, ChunkExecutionResult, ShardId};
-use near_store::PartialStorage;
+use near_store::flat::BlockInfo;
+use near_store::trie::ops::resharding::RetainMode;
+use near_store::{PartialStorage, ShardUId, Trie};
 use node_runtime::SignedValidPeriodTransactions;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,10 +68,6 @@ pub fn spice_pre_validate_chunk_state_witness(
     }
 
     let prev_block_header = prev_block.header();
-
-    // TODO(spice-resharding): Handle resharding, same as part of implicit_transition_params in
-    // non-spice validation. See
-    // get_resharding_transition in c/c/s/stateless_validation/chunk_validation.rs
 
     let receipts_to_apply = validate_source_receipts_proofs(
         &state_witness.source_receipt_proofs(),
@@ -129,6 +130,19 @@ pub fn spice_pre_validate_chunk_state_witness(
             &prev_execution_result.chunk_extra
         };
 
+        // If this chunk is the first post-split chunk for a child shard, the
+        // witness carries the retain-split implicit transition. Replay it to
+        // derive the child's starting state root from the parent's end state
+        // root before running the main transition.
+        let prev_state_root = derive_prev_state_root_after_resharding(
+            state_witness.resharding_transitions(),
+            *prev_chunk_chunk_extra.state_root(),
+            prev_block,
+            &shard_layout,
+            shard_id,
+            epoch_manager,
+        )?;
+
         let storage_context = StorageContext {
             storage_data_source: StorageDataSource::Recorded(PartialStorage {
                 nodes: state_witness.main_state_transition().base_state.clone(),
@@ -142,7 +156,7 @@ pub fn spice_pre_validate_chunk_state_witness(
         )?;
         NewChunkData {
             gas_limit: prev_chunk_chunk_extra.gas_limit(),
-            prev_state_root: *prev_chunk_chunk_extra.state_root(),
+            prev_state_root,
             prev_validator_proposals,
             chunk_hash: if chunk_header.is_new_chunk(block.header().height()) {
                 Some(chunk_header.chunk_hash().clone())
@@ -212,8 +226,6 @@ pub fn spice_validate_chunk_state_witness(
         )));
     }
 
-    // TODO(spice-resharding): Handle possible resharding transitions.
-
     let shard_layout = epoch_manager.get_shard_layout(&epoch_id)?;
     let outgoing_receipts_hashes = Chain::build_receipts_hashes(&outgoing_receipts, &shard_layout)?;
     let (outgoing_receipts_root, _) = merklize(&outgoing_receipts_hashes);
@@ -229,6 +241,80 @@ pub fn spice_validate_chunk_state_witness(
     }
 
     Ok(execution_result)
+}
+
+/// For a chunk on `shard_id` at a block where the previous block crossed an
+/// epoch boundary with a shard-layout change, derive the child shard's starting
+/// state root from the parent's end-of-epoch state root by replaying
+/// `retain_split_shard` on the partial parent trie supplied in the witness.
+/// Returns `parent_state_root` unchanged when the witness carries no
+/// resharding transitions, which is the normal case.
+fn derive_prev_state_root_after_resharding(
+    resharding_transitions: &[SpiceChunkStateTransition],
+    parent_state_root: CryptoHash,
+    prev_block: &Block,
+    shard_layout: &ShardLayout,
+    shard_id: ShardId,
+    epoch_manager: &dyn EpochManagerAdapter,
+) -> Result<CryptoHash, Error> {
+    if resharding_transitions.is_empty() {
+        return Ok(parent_state_root);
+    }
+    if resharding_transitions.len() != 1 {
+        return Err(Error::InvalidChunkStateWitness(format!(
+            "expected at most 1 resharding transition, found {}",
+            resharding_transitions.len()
+        )));
+    }
+
+    let shard_uid = ShardUId::from_shard_id_and_layout(shard_id, shard_layout);
+    let prev_block_info = BlockInfo {
+        hash: *prev_block.hash(),
+        height: prev_block.header().height(),
+        prev_hash: *prev_block.header().prev_hash(),
+    };
+    let prev_block_is_last_of_prev_epoch =
+        epoch_manager.is_next_block_epoch_start(prev_block.hash())?;
+    let split_params = if prev_block_is_last_of_prev_epoch {
+        match ReshardingEventType::from_shard_layout(shard_layout, prev_block_info)? {
+            Some(ReshardingEventType::SplitShard(params)) => params,
+            None => {
+                return Err(Error::InvalidChunkStateWitness(
+                    "witness contains resharding transition but no shard split at boundary"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        return Err(Error::InvalidChunkStateWitness(
+            "witness contains resharding transition but prev block is not end of epoch".to_string(),
+        ));
+    };
+
+    let retain_mode = if split_params.left_child_shard == shard_uid {
+        RetainMode::Left
+    } else if split_params.right_child_shard == shard_uid {
+        RetainMode::Right
+    } else {
+        return Err(Error::InvalidChunkStateWitness(format!(
+            "witness contains resharding transition but shard {:?} is not a child of the split",
+            shard_uid
+        )));
+    };
+
+    let ReshardingSplitShardParams { boundary_account, .. } = split_params;
+    let transition = &resharding_transitions[0];
+    let partial_storage = PartialStorage { nodes: transition.base_state.clone() };
+    let parent_trie = Trie::from_recorded_storage(partial_storage, parent_state_root, true);
+    let trie_changes = parent_trie.retain_split_shard(&boundary_account, retain_mode)?;
+
+    if trie_changes.new_root != transition.post_state_root {
+        return Err(Error::InvalidChunkStateWitness(format!(
+            "resharding transition post state root {:?} does not match derived root {:?}",
+            transition.post_state_root, trie_changes.new_root
+        )));
+    }
+    Ok(trie_changes.new_root)
 }
 
 fn validate_source_receipts_proofs(
