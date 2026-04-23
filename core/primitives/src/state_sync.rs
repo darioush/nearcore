@@ -4,9 +4,10 @@ use crate::sharding::{
     ReceiptProof, ShardChunk, ShardChunkHeader, ShardChunkHeaderV1, ShardChunkV1,
 };
 use crate::state_part::{StatePart, StatePartV0};
-use crate::types::{BlockHeight, EpochId, ShardId, StateRoot, StateRootNode};
+use crate::types::{BlockHeight, ChunkExecutionResult, EpochId, ShardId, StateRoot, StateRootNode};
 use borsh::{BorshDeserialize, BorshSerialize};
-use near_primitives_core::types::{EpochHeight, ProtocolVersion};
+use near_crypto::Signature;
+use near_primitives_core::types::{AccountId, EpochHeight, ProtocolVersion};
 use near_primitives_core::version::ProtocolFeature;
 use near_schema_checker_lib::ProtocolSchema;
 use std::sync::Arc;
@@ -148,6 +149,34 @@ impl BitArray {
     }
 }
 
+/// An endorsement signature carried inside a state sync response header under SPICE.
+/// Together with the `ChunkExecutionResult` that sits alongside it in the header, these
+/// signatures provide validator-quorum certification of the target state root — exactly what
+/// the on-chain `SpiceCoreStatement::ChunkExecutionResult` provides, but self-contained in the
+/// message so a receiver doesn't need any particular block body.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, ProtocolSchema)]
+pub struct SpiceStateHeaderEndorsement {
+    pub account_id: AccountId,
+    pub signature: Signature,
+}
+
+/// Like V2 but with additional SPICE-specific fields. Under SPICE, chunk headers do not carry
+/// state roots; the target comes from the on-chain `ChunkExecutionResult`. This header carries
+/// that certified result plus the validator signatures that certify it. `state_root_node`
+/// corresponds to `spice_execution_result.chunk_extra.state_root`.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, ProtocolSchema)]
+pub struct ShardStateSyncResponseHeaderV3 {
+    pub chunk: ShardChunk,
+    pub chunk_proof: MerklePath,
+    pub prev_chunk_header: Option<ShardChunkHeader>,
+    pub prev_chunk_proof: Option<MerklePath>,
+    pub incoming_receipts_proofs: Vec<ReceiptProofResponse>,
+    pub root_proofs: Vec<Vec<RootProof>>,
+    pub state_root_node: StateRootNode,
+    pub spice_execution_result: ChunkExecutionResult,
+    pub spice_endorsements: Vec<SpiceStateHeaderEndorsement>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -155,6 +184,7 @@ impl BitArray {
 pub enum ShardStateSyncResponseHeader {
     V1(ShardStateSyncResponseHeaderV1) = 0,
     V2(ShardStateSyncResponseHeaderV2) = 1,
+    V3(ShardStateSyncResponseHeaderV3) = 2,
 }
 
 impl ShardStateSyncResponseHeader {
@@ -163,6 +193,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => ShardChunk::V1(header.chunk),
             Self::V2(header) => header.chunk,
+            Self::V3(header) => header.chunk,
         }
     }
 
@@ -171,6 +202,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => ShardChunk::V1(header.chunk.clone()),
             Self::V2(header) => header.chunk.clone(),
+            Self::V3(header) => header.chunk.clone(),
         }
     }
 
@@ -179,6 +211,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => header.prev_chunk_header.clone().map(ShardChunkHeader::V1),
             Self::V2(header) => header.prev_chunk_header.clone(),
+            Self::V3(header) => header.prev_chunk_header.clone(),
         }
     }
 
@@ -187,6 +220,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => header.chunk.header.height_included,
             Self::V2(header) => header.chunk.height_included(),
+            Self::V3(header) => header.chunk.height_included(),
         }
     }
 
@@ -195,6 +229,40 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => header.chunk.header.inner.prev_state_root,
             Self::V2(header) => header.chunk.prev_state_root(),
+            // Under SPICE the chunk header's prev_state_root is zero and meaningless. The real
+            // target for the downloader is carried in the execution result. Use `state_root()`
+            // instead of reading this field directly.
+            Self::V3(header) => header.chunk.prev_state_root(),
+        }
+    }
+
+    /// Returns the state root the downloader should target. Matches `chunk_prev_state_root` for
+    /// V1/V2, and `spice_execution_result.chunk_extra.state_root` for V3.
+    #[inline]
+    pub fn state_root(&self) -> StateRoot {
+        match self {
+            Self::V1(_) | Self::V2(_) => self.chunk_prev_state_root(),
+            Self::V3(header) => *header.spice_execution_result.chunk_extra.state_root(),
+        }
+    }
+
+    /// Returns the SPICE-certified execution result carried by the header, or `None` for
+    /// pre-SPICE variants.
+    #[inline]
+    pub fn spice_execution_result(&self) -> Option<&ChunkExecutionResult> {
+        match self {
+            Self::V1(_) | Self::V2(_) => None,
+            Self::V3(header) => Some(&header.spice_execution_result),
+        }
+    }
+
+    /// Returns the validator signatures endorsing the SPICE execution result, or an empty slice
+    /// for pre-SPICE variants.
+    #[inline]
+    pub fn spice_endorsements(&self) -> &[SpiceStateHeaderEndorsement] {
+        match self {
+            Self::V1(_) | Self::V2(_) => &[],
+            Self::V3(header) => &header.spice_endorsements,
         }
     }
 
@@ -203,6 +271,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => &header.chunk_proof,
             Self::V2(header) => &header.chunk_proof,
+            Self::V3(header) => &header.chunk_proof,
         }
     }
 
@@ -211,6 +280,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => &header.prev_chunk_proof,
             Self::V2(header) => &header.prev_chunk_proof,
+            Self::V3(header) => &header.prev_chunk_proof,
         }
     }
 
@@ -219,6 +289,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => &header.incoming_receipts_proofs,
             Self::V2(header) => &header.incoming_receipts_proofs,
+            Self::V3(header) => &header.incoming_receipts_proofs,
         }
     }
 
@@ -227,6 +298,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => &header.root_proofs,
             Self::V2(header) => &header.root_proofs,
+            Self::V3(header) => &header.root_proofs,
         }
     }
 
@@ -235,6 +307,7 @@ impl ShardStateSyncResponseHeader {
         match self {
             Self::V1(header) => &header.state_root_node,
             Self::V2(header) => &header.state_root_node,
+            Self::V3(header) => &header.state_root_node,
         }
     }
 

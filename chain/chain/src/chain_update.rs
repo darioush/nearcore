@@ -493,6 +493,9 @@ impl<'a> ChainUpdate<'a> {
             ShardStateSyncResponseHeader::V2(shard_state_header) => {
                 (shard_state_header.chunk, shard_state_header.incoming_receipts_proofs)
             }
+            ShardStateSyncResponseHeader::V3(shard_state_header) => {
+                (shard_state_header.chunk, shard_state_header.incoming_receipts_proofs)
+            }
         };
 
         // Note that block headers are already synced and can be taken
