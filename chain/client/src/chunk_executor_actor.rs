@@ -11,6 +11,8 @@ use near_chain::BlockHeader;
 use near_chain::ChainStoreAccess;
 use near_chain::PendingShardJobs;
 use near_chain::chain::{NewChunkData, NewChunkResult, ShardContext, StorageContext};
+use near_chain::resharding::manager::ReshardingManager;
+use near_chain::resharding::types::ReshardingSender;
 use near_chain::sharding::get_receipts_shuffle_salt;
 use near_chain::sharding::shuffle_receipt_proofs;
 use near_chain::spice_chunk_application::build_spice_apply_chunk_block_context;
@@ -104,6 +106,7 @@ pub struct ChunkExecutorActor {
     myself_sender: Sender<ExecutorApplyChunksDone>,
     pub(crate) core_writer_sender: Sender<SpiceChunkEndorsementMessage>,
     data_distributor_adapter: SpiceDataDistributorAdapter,
+    resharding_manager: ReshardingManager,
 
     blocks_in_execution: HashSet<CryptoHash>,
     pending_unverified_receipts: HashMap<CryptoHash, Vec<ExecutorIncomingUnverifiedReceipts>>,
@@ -125,10 +128,17 @@ impl ChunkExecutorActor {
         myself_sender: Sender<ExecutorApplyChunksDone>,
         core_writer_sender: Sender<SpiceChunkEndorsementMessage>,
         data_distributor_adapter: SpiceDataDistributorAdapter,
+        resharding_sender: ReshardingSender,
         config: ChunkExecutorConfig,
     ) -> Self {
         let core_reader =
             SpiceCoreReader::new(store.chain_store(), epoch_manager.clone(), genesis.gas_limit);
+        let resharding_manager = ReshardingManager::new(
+            store.clone(),
+            epoch_manager.clone(),
+            shard_tracker.clone(),
+            resharding_sender,
+        );
         let chain_store =
             ChainStore::new(store, config.save_trie_changes, genesis.transaction_validity_period)
                 .with_save_tx_outcomes(config.save_tx_outcomes)
@@ -147,6 +157,7 @@ impl ChunkExecutorActor {
             core_reader,
             data_distributor_adapter,
             core_writer_sender,
+            resharding_manager,
             pending_unverified_receipts: HashMap::new(),
         }
     }
@@ -696,6 +707,26 @@ impl ChunkExecutorActor {
         let final_execution_head = chain_update.update_spice_final_execution_head(&block)?;
         chain_update.save_spice_execution_head(block.header())?;
         chain_update.commit()?;
+
+        // After the parent's ChunkExtra has been committed, trigger resharding for
+        // each tracked shard. ReshardingManager::start_resharding is a no-op unless
+        // this block is the last of an epoch with a layout change.
+        for shard_id in self.epoch_manager.shard_ids(&epoch_id)? {
+            let prev_hash = block.header().prev_hash();
+            if !self.shard_tracker.cares_about_shard(prev_hash, shard_id)
+                && !self.shard_tracker.will_care_about_shard(prev_hash, shard_id)
+            {
+                continue;
+            }
+            let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, &epoch_id)?;
+            self.resharding_manager.start_resharding(
+                self.chain_store.store_update(),
+                &block,
+                shard_uid,
+                self.runtime_adapter.get_tries(),
+            )?;
+        }
+
         if let Some(final_execution_head) = final_execution_head {
             self.update_flat_storage_head(&shard_layout, &final_execution_head)?;
             self.gc_memtrie_roots(&shard_layout, &final_execution_head);
@@ -1207,7 +1238,7 @@ pub(crate) fn is_descendant_of_final_execution_head(
 pub mod testonly {
     use super::*;
     use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-    use near_async::messaging::noop;
+    use near_async::messaging::{IntoMultiSender, noop};
     use near_chain::spice_core_writer_actor::SpiceCoreWriterActor;
     use parking_lot::RwLock;
 
@@ -1293,6 +1324,7 @@ pub mod testonly {
                     myself_sender,
                     core_writer_sender,
                     data_distributor_adapter,
+                    noop().into_multi_sender(),
                     chunk_executor_config,
                 ),
                 actor_rc,

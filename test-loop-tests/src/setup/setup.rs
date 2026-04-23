@@ -452,6 +452,7 @@ pub fn setup_client(
         chunk_executor_adapter.as_sender(),
         spice_core_writer_adapter.as_sender(),
         spice_data_distributor_adapter.as_multi_sender(),
+        resharding_sender.as_multi_sender(),
         ChunkExecutorConfig {
             save_trie_changes: client_config.save_trie_changes,
             save_tx_outcomes: client_config.save_tx_outcomes,

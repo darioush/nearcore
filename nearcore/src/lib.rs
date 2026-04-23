@@ -261,6 +261,7 @@ fn spawn_spice_actors(
     shard_tracker: ShardTracker,
     runtime: Arc<NightshadeRuntime>,
     network_adapter: PeerManagerAdapter,
+    resharding_sender: near_chain::resharding::types::ReshardingSender,
     chunk_executor_config: ChunkExecutorConfig,
     chunk_executor_adapter: &Arc<LateBoundSender<TokioRuntimeHandle<ChunkExecutorActor>>>,
     spice_chunk_validator_adapter: &Arc<
@@ -316,6 +317,7 @@ fn spawn_spice_actors(
         chunk_executor_adapter.as_sender(),
         spice_core_writer_adapter.as_sender(),
         spice_data_distributor_adapter.as_multi_sender(),
+        resharding_sender,
         chunk_executor_config,
     );
     let chunk_executor_addr = actor_system.spawn_tokio_actor(chunk_executor_actor);
@@ -580,14 +582,6 @@ pub async fn start_with_config_and_synchronization_impl(
         storage.is_local_archive(),
     ));
 
-    let resharding_handle = ReshardingHandle::new();
-    let resharding_sender = actor_system.spawn_tokio_actor(ReshardingActor::new(
-        epoch_manager.clone(),
-        runtime.clone(),
-        resharding_handle.clone(),
-        config.client_config.resharding_config.clone(),
-    ));
-
     let state_sync_spawner: Arc<dyn FutureSpawner> =
         actor_system.new_multi_threaded_future_spawner("state sync").into();
 
@@ -604,6 +598,16 @@ pub async fn start_with_config_and_synchronization_impl(
         &spice_data_distributor_adapter,
         &spice_core_writer_adapter,
     );
+
+    let resharding_handle = ReshardingHandle::new();
+    let resharding_sender: near_chain::resharding::types::ReshardingSender = actor_system
+        .spawn_tokio_actor(ReshardingActor::new(
+            epoch_manager.clone(),
+            runtime.clone(),
+            resharding_handle.clone(),
+            config.client_config.resharding_config.clone(),
+        ))
+        .into_multi_sender();
 
     let StartClientResult {
         client_actor,
@@ -631,7 +635,7 @@ pub async fn start_with_config_and_synchronization_impl(
         partial_witness_actor.clone().into_multi_sender(),
         true,
         None,
-        resharding_sender.into_multi_sender(),
+        resharding_sender.clone(),
         block_notification_watch_sender,
         spice_client_config,
     );
@@ -657,6 +661,7 @@ pub async fn start_with_config_and_synchronization_impl(
             shard_tracker.clone(),
             runtime.clone(),
             network_adapter.as_multi_sender(),
+            resharding_sender,
             ChunkExecutorConfig {
                 save_trie_changes: config.client_config.save_trie_changes,
                 save_tx_outcomes: config.client_config.save_tx_outcomes,

@@ -10,7 +10,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use itertools::Itertools as _;
 use near_async::futures::AsyncComputationSpawner;
 use near_async::messaging::Actor;
-use near_async::messaging::{Handler, IntoAsyncSender, IntoSender, Sender, noop};
+use near_async::messaging::{Handler, IntoAsyncSender, IntoMultiSender, IntoSender, Sender, noop};
 use near_async::test_utils::FakeDelayedActionRunner;
 use near_async::time::Clock;
 use near_chain::ChainStoreAccess;
@@ -193,6 +193,7 @@ impl TestActor {
             chunk_executor_adapter,
             core_writer_sender,
             data_distributor_adapter,
+            noop().into_multi_sender(),
             ChunkExecutorConfig::default(),
         );
         TestActor { chain, actor, actor_rc, tasks_rc }
