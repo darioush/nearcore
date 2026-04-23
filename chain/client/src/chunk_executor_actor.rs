@@ -46,6 +46,7 @@ use near_primitives::stateless_validation::spice_chunk_endorsement::SpiceChunkEn
 use near_primitives::stateless_validation::spice_state_witness::SpiceChunkStateTransition;
 use near_primitives::stateless_validation::spice_state_witness::SpiceChunkStateWitness;
 use near_primitives::stateless_validation::spice_state_witness::compute_contract_accesses_hash;
+use near_primitives::stateless_validation::stored_chunk_state_transition_data::StoredChunkStateTransitionData;
 use near_primitives::types::BlockExecutionResults;
 use near_primitives::types::BlockHeight;
 use near_primitives::types::ChunkExecutionResult;
@@ -723,6 +724,34 @@ impl ChunkExecutorActor {
         Ok(())
     }
 
+    /// Load the resharding implicit-transition data for the chunk at `block`
+    /// on `shard_id`. Returns a non-empty vec only when this chunk is the
+    /// first post-split chunk for a child shard — detected by the presence of
+    /// a `StoredChunkStateTransitionData` entry written by the resharding
+    /// manager at `(prev_block_hash, shard_id)`. The `post_state_root` is the
+    /// child's starting state root, read from the child's `ChunkExtra` written
+    /// by the split at the resharding block.
+    fn load_resharding_transitions(
+        &self,
+        block: &Block,
+        shard_id: ShardId,
+        epoch_id: &near_primitives::types::EpochId,
+    ) -> Result<Vec<SpiceChunkStateTransition>, Error> {
+        let prev_block_hash = block.header().prev_hash();
+        let Some(StoredChunkStateTransitionData::V1(data)) =
+            self.chain_store.store().get_ser::<StoredChunkStateTransitionData>(
+                DBCol::StateTransitionData,
+                &near_primitives::utils::get_block_shard_id(prev_block_hash, shard_id),
+            )
+        else {
+            return Ok(Vec::new());
+        };
+        let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, epoch_id)?;
+        let post_state_root =
+            *self.chain_store.get_chunk_extra(prev_block_hash, &shard_uid)?.state_root();
+        Ok(vec![SpiceChunkStateTransition { base_state: data.base_state, post_state_root }])
+    }
+
     /// After chunks for `block` have been applied and committed, handle memtrie
     /// and resharding state maintenance: finalize any completed background
     /// memtrie loads, trigger the resharding split if this block is the last of
@@ -872,11 +901,9 @@ impl ChunkExecutorActor {
                 .map(|proof| -> Result<_, Error> { Ok((proof.1.from_shard_id, proof)) })
                 .collect::<Result<_, Error>>()?
         };
-        // TODO(spice-resharding): Handle witness validation when resharding.
         let contract_accesses_hash = compute_contract_accesses_hash(&contract_accesses);
-        // TODO(spice-resharding): populate resharding_transitions when this chunk
-        // is the first post-split chunk of a child shard.
-        let resharding_transitions = Vec::new();
+        let resharding_transitions =
+            self.load_resharding_transitions(block, shard_id, &epoch_id)?;
         let state_witness = SpiceChunkStateWitness::new(
             near_primitives::types::SpiceChunkId { block_hash: *block_hash, shard_id },
             main_transition,
