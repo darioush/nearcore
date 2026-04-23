@@ -18,7 +18,7 @@ use near_chain::state_snapshot_actor::{
     SnapshotCallbacks, StateSnapshotActor, get_delete_snapshot_callback, get_make_snapshot_callback,
 };
 use near_chain::types::RuntimeAdapter;
-use near_chain::{ApplyChunksSpawner, Chain, ChainGenesis};
+use near_chain::{ApplyChunksSpawner, Chain, ChainGenesis, MemtrieLoadingSpawner};
 use near_chain_configs::{MutableValidatorSigner, ReshardingHandle};
 use near_chunks::shards_manager_actor::start_shards_manager;
 use near_client::adapter::client_sender_for_network;
@@ -314,6 +314,7 @@ fn spawn_spice_actors(
             let thread_limit = runtime.get_shard_limit(PROTOCOL_VERSION) as usize * 3;
             ApplyChunksSpawner::default().into_spawner(thread_limit)
         },
+        MemtrieLoadingSpawner::default(),
         chunk_executor_adapter.as_sender(),
         spice_core_writer_adapter.as_sender(),
         spice_data_distributor_adapter.as_multi_sender(),

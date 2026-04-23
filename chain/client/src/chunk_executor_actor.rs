@@ -25,7 +25,7 @@ use near_chain::types::{ApplyChunkBlockContext, RuntimeAdapter, StorageDataSourc
 use near_chain::update_shard::{ShardUpdateReason, ShardUpdateResult, process_shard_update};
 use near_chain::{
     Block, Chain, ChainGenesis, ChainStore, ChainUpdate, DoomslugThresholdMode, Error,
-    collect_receipts, get_chunk_clone_from_header,
+    MemtrieLoadingSpawner, collect_receipts, get_chunk_clone_from_header,
 };
 use near_chain_configs::MutableValidatorSigner;
 use near_chain_primitives::ApplyChunksMode;
@@ -103,6 +103,7 @@ pub struct ChunkExecutorActor {
     pub(crate) shard_tracker: ShardTracker,
     network_adapter: PeerManagerAdapter,
     apply_chunks_spawner: Arc<dyn AsyncComputationSpawner>,
+    memtrie_loading_spawner: Arc<dyn AsyncComputationSpawner>,
     myself_sender: Sender<ExecutorApplyChunksDone>,
     pub(crate) core_writer_sender: Sender<SpiceChunkEndorsementMessage>,
     data_distributor_adapter: SpiceDataDistributorAdapter,
@@ -125,6 +126,7 @@ impl ChunkExecutorActor {
         network_adapter: PeerManagerAdapter,
         validator_signer: MutableValidatorSigner,
         apply_chunks_spawner: Arc<dyn AsyncComputationSpawner>,
+        memtrie_loading_spawner: MemtrieLoadingSpawner,
         myself_sender: Sender<ExecutorApplyChunksDone>,
         core_writer_sender: Sender<SpiceChunkEndorsementMessage>,
         data_distributor_adapter: SpiceDataDistributorAdapter,
@@ -151,6 +153,7 @@ impl ChunkExecutorActor {
             shard_tracker,
             network_adapter,
             apply_chunks_spawner,
+            memtrie_loading_spawner: memtrie_loading_spawner.into_spawner(),
             myself_sender,
             blocks_in_execution: HashSet::new(),
             validator_signer,
@@ -708,29 +711,61 @@ impl ChunkExecutorActor {
         chain_update.save_spice_execution_head(block.header())?;
         chain_update.commit()?;
 
-        // After the parent's ChunkExtra has been committed, trigger resharding for
-        // each tracked shard. ReshardingManager::start_resharding is a no-op unless
-        // this block is the last of an epoch with a layout change.
-        for shard_id in self.epoch_manager.shard_ids(&epoch_id)? {
-            let prev_hash = block.header().prev_hash();
-            if !self.shard_tracker.cares_about_shard(prev_hash, shard_id)
-                && !self.shard_tracker.will_care_about_shard(prev_hash, shard_id)
-            {
-                continue;
-            }
-            let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, &epoch_id)?;
-            self.resharding_manager.start_resharding(
-                self.chain_store.store_update(),
-                &block,
-                shard_uid,
-                self.runtime_adapter.get_tries(),
-            )?;
-        }
+        // After the parent's ChunkExtra has been committed, handle memtrie/resharding
+        // maintenance. In SPICE this lives on the executor (driven by execution
+        // progress) rather than chain postprocess (driven by consensus progress).
+        self.post_apply_memtrie_and_resharding(&block, &epoch_id)?;
 
         if let Some(final_execution_head) = final_execution_head {
             self.update_flat_storage_head(&shard_layout, &final_execution_head)?;
             self.gc_memtrie_roots(&shard_layout, &final_execution_head);
         }
+        Ok(())
+    }
+
+    /// After chunks for `block` have been applied and committed, handle memtrie
+    /// and resharding state maintenance: finalize any completed background
+    /// memtrie loads, trigger the resharding split if this block is the last of
+    /// an epoch with a layout change, and at epoch boundaries start a preload
+    /// for an upcoming split and drop memtries for shards we no longer need.
+    fn post_apply_memtrie_and_resharding(
+        &mut self,
+        block: &Block,
+        epoch_id: &near_primitives::types::EpochId,
+    ) -> Result<(), Error> {
+        let tries = self.runtime_adapter.get_tries();
+        tries.try_finalize_background_memtrie_loading();
+
+        let prev_hash = block.header().prev_hash();
+        let mut shards_cares_this_or_next_epoch = vec![];
+        for shard_id in self.epoch_manager.shard_ids(epoch_id)? {
+            let cares_now = self.shard_tracker.cares_about_shard(prev_hash, shard_id);
+            let will_care = self.shard_tracker.will_care_about_shard(prev_hash, shard_id);
+            if !(cares_now || will_care) {
+                continue;
+            }
+            let shard_uid = shard_id_to_uid(self.epoch_manager.as_ref(), shard_id, epoch_id)?;
+            shards_cares_this_or_next_epoch.push(shard_uid);
+            // No-op unless this block is the last of an epoch with a layout change.
+            self.resharding_manager.start_resharding(
+                self.chain_store.store_update(),
+                block,
+                shard_uid,
+                self.runtime_adapter.get_tries(),
+            )?;
+        }
+
+        if self.epoch_manager.is_next_block_epoch_start(prev_hash)? {
+            near_chain::resharding::preload::maybe_start_memtrie_preload_for_resharding(
+                self.epoch_manager.as_ref(),
+                &self.shard_tracker,
+                &tries,
+                &*self.memtrie_loading_spawner,
+                block,
+            )?;
+            tries.retain_memtries(&shards_cares_this_or_next_epoch);
+        }
+
         Ok(())
     }
 
@@ -1321,6 +1356,7 @@ pub mod testonly {
                     network_adapter,
                     validator_signer,
                     Arc::new(spawner),
+                    MemtrieLoadingSpawner::default(),
                     myself_sender,
                     core_writer_sender,
                     data_distributor_adapter,

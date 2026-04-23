@@ -24,7 +24,7 @@ use near_chain::test_utils::{
     get_chain_with_genesis, get_fake_next_block_chunk_headers, process_block_sync,
 };
 use near_chain::types::Tip;
-use near_chain::{Block, Chain, ChainGenesis};
+use near_chain::{Block, Chain, ChainGenesis, MemtrieLoadingSpawner};
 use near_chain::{BlockProcessingArtifact, Provenance};
 use near_chain_configs::MutableValidatorSigner;
 use near_chain_configs::test_genesis::{TestGenesisBuilder, ValidatorsSpec};
@@ -190,6 +190,7 @@ impl TestActor {
             network_adapter,
             validator_signer,
             Arc::new(spawner),
+            MemtrieLoadingSpawner::default(),
             chunk_executor_adapter,
             core_writer_sender,
             data_distributor_adapter,

@@ -14,7 +14,7 @@ use near_chain::state_snapshot_actor::{
     SnapshotCallbacks, StateSnapshotActor, get_delete_snapshot_callback, get_make_snapshot_callback,
 };
 use near_chain::types::RuntimeAdapter;
-use near_chain::{ApplyChunksSpawner, ChainGenesis};
+use near_chain::{ApplyChunksSpawner, ChainGenesis, MemtrieLoadingSpawner};
 use near_chain_configs::{MutableConfigValue, ReshardingHandle};
 use near_chunks::shards_manager_actor::ShardsManagerActor;
 use near_client::archive::cloud_archival_writer::create_cloud_archival_writer;
@@ -449,6 +449,9 @@ pub fn setup_client(
         network_adapter.as_multi_sender(),
         validator_signer.clone(),
         Arc::new(test_loop.async_computation_spawner(identifier, |_| Duration::milliseconds(80))),
+        MemtrieLoadingSpawner::Custom(Arc::new(
+            test_loop.async_computation_spawner(identifier, |_| Duration::milliseconds(80)),
+        )),
         chunk_executor_adapter.as_sender(),
         spice_core_writer_adapter.as_sender(),
         spice_data_distributor_adapter.as_multi_sender(),
