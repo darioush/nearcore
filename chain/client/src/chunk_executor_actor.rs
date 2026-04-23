@@ -474,14 +474,29 @@ impl ChunkExecutorActor {
                 return Ok(TryApplyChunksOutcome::BlockAlreadyAccepted);
             }
 
-            let Some(prev_chunk_chunk_extra) =
-                self.get_chunk_extra(prev_block_hash, prev_block_shard_id)?
-            else {
-                return Ok(TryApplyChunksOutcome::previous_block_is_not_executed(
-                    *prev_block_hash,
-                    prev_block_shard_id,
-                ));
-            };
+            // Across a resharding boundary, the prev ChunkExtra for a child
+            // shard is the one synthesized by `ReshardingManager` at the
+            // resharding block, stored under the child's own ShardUId in the
+            // current (post-split) layout. Its state_root is the retain-split
+            // derived starting state. Using the parent's ChunkExtra would
+            // feed the parent's full state as the prev state for the child's
+            // first chunk, which is wrong. For non-boundary blocks the two
+            // resolve to the same ShardUId.
+            let child_shard_uid = ShardUId::from_shard_id_and_layout(
+                current_block_shard_id,
+                &current_block_shard_layout,
+            );
+            let prev_chunk_chunk_extra =
+                match self.chain_store.get_chunk_extra(prev_block_hash, &child_shard_uid) {
+                    Ok(chunk_extra) => chunk_extra,
+                    Err(near_chain::Error::DBNotFoundErr(_)) => {
+                        return Ok(TryApplyChunksOutcome::previous_block_is_not_executed(
+                            *prev_block_hash,
+                            current_block_shard_id,
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                };
 
             let incoming_receipts = if prev_block.header().is_genesis() {
                 // Genesis block has no outgoing receipts.
