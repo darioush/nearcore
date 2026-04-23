@@ -5,6 +5,7 @@ use near_chain_primitives::error::Error;
 use near_primitives::block::Tip;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{EpochHeight, EpochId};
+use near_primitives::version::ProtocolFeature;
 use near_store::adapter::StoreAdapter;
 use near_store::adapter::chain_store::ChainStoreAdapter;
 use near_store::db::CLOUD_MIN_HEAD_KEY;
@@ -131,6 +132,34 @@ fn has_enough_new_chunks(store: &Store, block_hash: &CryptoHash) -> Option<bool>
     Some(num_new_chunks.iter().all(|num_chunks| *num_chunks >= 2))
 }
 
+/// Returns true when an on-chain `SpiceCoreStatement::ChunkExecutionResult` is present for every
+/// shard of `block_hash`. Used to gate sync_hash finalization under SPICE: the target state root
+/// comes from the on-chain execution result rather than the chunk header, so a sync_hash without
+/// all shards' results on chain is not yet usable by downloading nodes.
+///
+/// `DBCol::ExecutionResults` keys are `(block_hash || shard_id_le_bytes)`, so entries under this
+/// prefix are unique per shard; counting them is equivalent to checking one-per-shard.
+///
+/// Must be called only after confirming SPICE is active for the relevant epoch — the
+/// `DBCol::execution_results()` accessor panics in non-SPICE builds.
+fn has_all_spice_execution_results(
+    store: &Store,
+    block_hash: &CryptoHash,
+    num_shards: usize,
+) -> bool {
+    store.iter_prefix(DBCol::execution_results(), block_hash.as_ref()).count() >= num_shards
+}
+
+/// Returns true if the SPICE protocol feature is enabled for the epoch the given header belongs
+/// to. Returns false if the epoch info is not yet available (best-effort; keeps non-SPICE
+/// behavior unchanged when called without SPICE activation).
+fn spice_enabled_for_epoch<T: ChainStoreAccess>(chain_store: &T, epoch_id: &EpochId) -> bool {
+    let Ok(epoch_info) = chain_store.store().epoch_store().get_epoch_info(epoch_id) else {
+        return false;
+    };
+    ProtocolFeature::Spice.enabled(epoch_info.protocol_version())
+}
+
 /// Save num new chunks info and store the state sync hash if it has been found. We store it only
 /// once it becomes final.
 /// This should only be called if DBCol::StateSyncHashes does not yet have an entry for header.epoch_id().
@@ -183,7 +212,22 @@ fn on_new_header<T: ChainStoreAccess>(
 
         if !prev_prev_done {
             // `sync_prev_prev` doesn't have enough new chunks, and `sync_prev` does, meaning `sync` is the first final
-            // valid sync block
+            // valid sync block.
+            //
+            // Under SPICE, the sync target state root comes from the on-chain
+            // `ChunkExecutionResult` rather than the chunk header. Wait until all shards'
+            // execution results for `sync_prev` are on chain before finalizing; the next
+            // header will revisit this candidate.
+            if spice_enabled_for_epoch(chain_store, epoch_id)
+                && !has_all_spice_execution_results(
+                    &chain_store.store(),
+                    sync_prev.hash(),
+                    sync_prev.chunk_mask().len(),
+                )
+            {
+                return Ok(());
+            }
+
             store_update.set_ser(DBCol::StateSyncHashes, epoch_id.as_ref(), sync.hash());
             store_update.delete_all(DBCol::StateSyncNewChunks);
             return Ok(());
