@@ -130,6 +130,7 @@ fn new_test_witness_for_chunk(
             shard_id: chunk_header.shard_id(),
         },
         state_transition,
+        Vec::new(),
         receipt_proofs,
         receipts_hash,
         transactions,

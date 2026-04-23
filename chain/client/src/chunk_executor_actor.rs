@@ -874,9 +874,13 @@ impl ChunkExecutorActor {
         };
         // TODO(spice-resharding): Handle witness validation when resharding.
         let contract_accesses_hash = compute_contract_accesses_hash(&contract_accesses);
+        // TODO(spice-resharding): populate resharding_transitions when this chunk
+        // is the first post-split chunk of a child shard.
+        let resharding_transitions = Vec::new();
         let state_witness = SpiceChunkStateWitness::new(
             near_primitives::types::SpiceChunkId { block_hash: *block_hash, shard_id },
             main_transition,
+            resharding_transitions,
             source_receipt_proofs,
             applied_receipts_hash,
             transactions,

@@ -563,6 +563,7 @@ fn test_witness_message(
     let witness = SpiceChunkStateWitness::new(
         SpiceChunkId { block_hash: *block.hash(), shard_id: chunk_header.shard_id() },
         state_transition,
+        Vec::new(),
         receipt_proofs,
         receipts_hash,
         transactions,

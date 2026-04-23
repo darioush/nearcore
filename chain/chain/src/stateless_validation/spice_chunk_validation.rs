@@ -568,6 +568,7 @@ mod tests {
                 base_state: PartialState::TrieValues(vec![]),
                 post_state_root: CryptoHash::default(),
             },
+            Vec::new(),
             HashMap::new(),
             hash(&borsh::to_vec(receipts.as_slice()).unwrap()),
             vec![],
@@ -613,6 +614,7 @@ mod tests {
                 base_state: PartialState::TrieValues(vec![]),
                 post_state_root: CryptoHash::default(),
             },
+            Vec::new(),
             invalid_source_receipt_proofs,
             hash(&borsh::to_vec(receipts.as_slice()).unwrap()),
             test_chain.transactions(),
@@ -816,6 +818,7 @@ mod tests {
     struct TestWitnessBuilder {
         chunk_id: SpiceChunkId,
         main_state_transition: SpiceChunkStateTransition,
+        resharding_transitions: Vec<SpiceChunkStateTransition>,
         source_receipt_proofs: HashMap<ShardId, ReceiptProof>,
         applied_receipts_hash: CryptoHash,
         transactions: Vec<SignedTransaction>,
@@ -844,6 +847,7 @@ mod tests {
             Self {
                 chunk_id: default.chunk_id().clone(),
                 main_state_transition: default.main_state_transition().clone(),
+                resharding_transitions: default.resharding_transitions().to_vec(),
                 source_receipt_proofs: default.source_receipt_proofs().clone(),
                 applied_receipts_hash: *default.applied_receipts_hash(),
                 transactions: default.transactions().to_vec(),
@@ -856,6 +860,7 @@ mod tests {
             SpiceChunkStateWitness::new(
                 self.chunk_id,
                 self.main_state_transition,
+                self.resharding_transitions,
                 self.source_receipt_proofs,
                 self.applied_receipts_hash,
                 self.transactions,
@@ -1042,6 +1047,7 @@ mod tests {
             SpiceChunkStateWitness::new(
                 SpiceChunkId { block_hash: *block.hash(), shard_id },
                 transition,
+                Vec::new(),
                 receipt_proofs,
                 receipts_hash,
                 transactions,
@@ -1063,6 +1069,7 @@ mod tests {
             SpiceChunkStateWitness::new(
                 SpiceChunkId { block_hash: *block.hash(), shard_id },
                 transition,
+                Vec::new(),
                 receipt_proofs,
                 receipts_hash,
                 transactions,

@@ -71,6 +71,16 @@ pub struct SpiceChunkStateWitnessV1 {
     /// that takes us from the pre-state-root of the chunk of this shard to
     /// the post-state-root of that same chunk.
     pub main_state_transition: SpiceChunkStateTransition,
+    /// Implicit state transitions that precede the main transition. In SPICE
+    /// the only implicit transition is the retain-split that runs at a
+    /// resharding boundary: to validate the first post-split chunk for a
+    /// child shard, the validator must first reconstruct the child's starting
+    /// state root from the parent's end-of-epoch state root by running
+    /// `retain_split_shard` over a partial parent trie. This Vec carries the
+    /// partial state and expected post-state-root for each such transition,
+    /// in application order (parent -> child). Empty for chunks not at a
+    /// resharding boundary.
+    pub resharding_transitions: Vec<SpiceChunkStateTransition>,
     /// For the main state transition, we apply transactions and receipts.
     /// Exactly which of them must be applied is a deterministic property
     /// based on the blockchain history this chunk is based on.
@@ -108,6 +118,7 @@ impl SpiceChunkStateWitness {
     pub fn new(
         chunk_id: SpiceChunkId,
         main_state_transition: SpiceChunkStateTransition,
+        resharding_transitions: Vec<SpiceChunkStateTransition>,
         source_receipt_proofs: HashMap<ShardId, ReceiptProof>,
         applied_receipts_hash: CryptoHash,
         transactions: Vec<SignedTransaction>,
@@ -117,6 +128,7 @@ impl SpiceChunkStateWitness {
         Self::V1(SpiceChunkStateWitnessV1 {
             chunk_id,
             main_state_transition,
+            resharding_transitions,
             source_receipt_proofs,
             applied_receipts_hash,
             transactions,
@@ -140,6 +152,12 @@ impl SpiceChunkStateWitness {
     pub fn mut_main_state_transition(&mut self) -> &mut SpiceChunkStateTransition {
         match self {
             Self::V1(witness) => &mut witness.main_state_transition,
+        }
+    }
+
+    pub fn resharding_transitions(&self) -> &[SpiceChunkStateTransition] {
+        match self {
+            Self::V1(witness) => &witness.resharding_transitions,
         }
     }
 
