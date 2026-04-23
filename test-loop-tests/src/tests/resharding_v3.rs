@@ -1132,8 +1132,6 @@ fn slow_test_resharding_v3_skip_when_no_children_tracked() {
 }
 
 #[test]
-// TODO(spice-test): Assess if this test is relevant for spice and if yes fix it.
-#[cfg_attr(feature = "protocol_feature_spice", ignore)]
 fn slow_test_resharding_v3_track_all_shards() {
     test_resharding_v3_base(
         TestReshardingParametersBuilder::default()

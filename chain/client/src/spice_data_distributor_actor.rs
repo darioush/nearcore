@@ -449,6 +449,73 @@ impl SpiceDataDistributorActor {
         DistributionData { commitment, parts }
     }
 
+    /// The set of `to_shard_id`s (keyed in the current block's epoch layout) a
+    /// node should wait for receipt proofs on, given the shards it will apply
+    /// in the next block. Receipt proofs produced by the current block's
+    /// chunks are keyed by the current epoch's shard layout, so each next-
+    /// epoch child shard we will apply maps to its parent in the current
+    /// layout when the two layouts differ. Deduplicates when multiple
+    /// children share a parent.
+    fn receipt_proof_to_shards_to_wait_for(
+        &self,
+        current_block_epoch_id: &EpochId,
+        next_block_epoch_id: &EpochId,
+        next_block_prev_hash: &CryptoHash,
+    ) -> Result<HashSet<ShardId>, Error> {
+        let current_shard_layout = self.epoch_manager.get_shard_layout(current_block_epoch_id)?;
+        let next_shard_layout = self.epoch_manager.get_shard_layout(next_block_epoch_id)?;
+        let same_layout = current_shard_layout == next_shard_layout;
+        let mut to_shards: HashSet<ShardId> = HashSet::new();
+        for next_shard_id in next_shard_layout.shard_ids() {
+            if !self.shard_tracker.should_apply_chunk(
+                ApplyChunksMode::IsCaughtUp,
+                next_block_prev_hash,
+                next_shard_id,
+            ) {
+                continue;
+            }
+            let parent = if same_layout {
+                next_shard_id
+            } else {
+                next_shard_layout
+                    .try_get_parent_shard_id(next_shard_id)
+                    .map_err(|err| Error::NearChainError(near_chain::Error::from(err)))?
+                    .unwrap_or(next_shard_id)
+            };
+            to_shards.insert(parent);
+        }
+        Ok(to_shards)
+    }
+
+    /// Chunk producers in `next_block_epoch_id` that should receive a receipt
+    /// proof whose `to_shard_id` was produced in the prev-block epoch's layout.
+    /// If the shard carried over into the next layout, this is just the
+    /// producers of that shard; if it was split at the epoch boundary, this is
+    /// the union of producers of all child shards in the next layout.
+    fn receipt_proof_recipients(
+        &self,
+        next_block_epoch_id: &EpochId,
+        to_shard_id: ShardId,
+    ) -> Result<Vec<AccountId>, Error> {
+        let next_shard_layout = self.epoch_manager.get_shard_layout(next_block_epoch_id)?;
+        let recipient_shards: Vec<ShardId> =
+            if next_shard_layout.shard_ids().any(|s| s == to_shard_id) {
+                vec![to_shard_id]
+            } else {
+                next_shard_layout
+                    .get_children_shards_ids(to_shard_id)
+                    .ok_or(Error::InvalidReceiptToShardId)?
+            };
+        let mut recipients = Vec::new();
+        for recipient_shard in recipient_shards {
+            recipients.extend(
+                self.epoch_manager
+                    .get_epoch_chunk_producers_for_shard(next_block_epoch_id, recipient_shard)?,
+            );
+        }
+        Ok(recipients)
+    }
+
     // TODO(spice): Implement dynamically changing the recipients for witness if relevant chunk
     // isn't endorsed for too long.
     // TODO(spice): Cache the results since likely they would be used often.
@@ -463,14 +530,11 @@ impl SpiceDataDistributorActor {
                 let epoch_id = block.header().epoch_id();
                 let next_block_epoch_id =
                     self.epoch_manager.get_epoch_id_from_prev_block(block_hash)?;
-                // TODO(spice-resharding): validate whether from_shard_id and to_shard_id would be
-                // correct when resharding.
                 let producers = self
                     .epoch_manager
                     .get_epoch_chunk_producers_for_shard(&epoch_id, *from_shard_id)?;
-                let recipients = self
-                    .epoch_manager
-                    .get_epoch_chunk_producers_for_shard(&next_block_epoch_id, *to_shard_id)?;
+                let recipients =
+                    self.receipt_proof_recipients(&next_block_epoch_id, *to_shard_id)?;
                 (recipients, producers)
             }
             SpiceDataIdentifier::Witness { block_hash, shard_id } => {
@@ -705,8 +769,9 @@ impl SpiceDataDistributorActor {
                 if !shard_ids.contains(from_shard_id) {
                     return Err(Error::InvalidReceiptFromShardId);
                 }
-                // TODO(spice-resharding): If to_shard_id may be from the next_epoch this check
-                // needs to be adjusted.
+                // `to_shard_id` is always in the producer epoch's layout. If the
+                // next epoch splits this shard, the distributor's recipient
+                // selection handles the fan-out — no new shard id appears here.
                 if !shard_ids.contains(to_shard_id) {
                     return Err(Error::InvalidReceiptToShardId);
                 }
@@ -881,25 +946,19 @@ impl SpiceDataDistributorActor {
             }
         }
 
-        let shards_we_apply_in_next_block: HashSet<ShardId> = shard_layout
-            .shard_ids()
-            .filter(|shard_id| {
-                let prev_hash = block.hash();
-                self.shard_tracker.should_apply_chunk(
-                    ApplyChunksMode::IsCaughtUp,
-                    prev_hash,
-                    *shard_id,
-                )
-            })
-            .collect();
+        let next_block_epoch_id = self.epoch_manager.get_epoch_id_from_prev_block(block.hash())?;
+        let to_shards_to_wait_for = self.receipt_proof_to_shards_to_wait_for(
+            block.header().epoch_id(),
+            &next_block_epoch_id,
+            block.hash(),
+        )?;
 
         for from_shard_id in shard_layout.shard_ids() {
-            // We need a receipts from a block only if we would want to apply a block after.
+            // We need receipts from a block only if we would want to apply a block after.
             if shards_we_apply.contains(&from_shard_id) {
                 continue;
             }
-            // TODO(spice-resharding): Handle resharding
-            for to_shard_id in shards_we_apply_in_next_block.iter().copied() {
+            for to_shard_id in to_shards_to_wait_for.iter().copied() {
                 new_ids.push(SpiceDataIdentifier::ReceiptProof {
                     block_hash: *block_hash,
                     from_shard_id,

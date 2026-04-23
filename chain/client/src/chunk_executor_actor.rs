@@ -450,12 +450,18 @@ impl ChunkExecutorActor {
         let mut chunk_contexts = Vec::new();
         let prev_block_epoch_id = self.epoch_manager.get_epoch_id(prev_block_hash)?;
         let prev_block_shard_ids = self.epoch_manager.shard_ids(&prev_block_epoch_id)?;
+        let prev_block_shard_layout = self.epoch_manager.get_shard_layout(&prev_block_epoch_id)?;
         let current_block_shard_layout =
             self.epoch_manager.get_shard_layout(&block.header().epoch_id())?;
-        for &prev_block_shard_id in &prev_block_shard_ids {
-            // TODO(spice-resharding): convert `prev_block_shard_id` into `shard_id` for
-            // the current shard layout
-            let current_block_shard_id = prev_block_shard_id;
+        for current_block_shard_id in current_block_shard_layout.shard_ids() {
+            // Across a resharding boundary the prev-block's chunk (and its
+            // outgoing receipts) live under the parent shard id; for
+            // carry-over shards the mapping is identity.
+            let prev_block_shard_id = current_to_prev_block_shard_id(
+                &current_block_shard_layout,
+                &prev_block_shard_layout,
+                current_block_shard_id,
+            )?;
             if !self.shard_tracker.should_apply_chunk(
                 ApplyChunksMode::IsCaughtUp,
                 prev_block_hash,
@@ -1195,6 +1201,24 @@ fn set_witness(
     let key = get_witnesses_key(block_hash, shard_id);
     let value = borsh::to_vec(&witness).unwrap();
     store_update.set(DBCol::witnesses(), &key, &value);
+}
+
+/// For a shard in the current block's layout, return the shard id under which
+/// the previous block stored its chunk data (ChunkExtra, outgoing receipts).
+/// For shards that were split across the epoch boundary this is the parent
+/// shard id in the previous layout; for carry-over shards it is the same id.
+fn current_to_prev_block_shard_id(
+    current_block_shard_layout: &ShardLayout,
+    prev_block_shard_layout: &ShardLayout,
+    current_block_shard_id: ShardId,
+) -> Result<ShardId, Error> {
+    if current_block_shard_layout == prev_block_shard_layout {
+        return Ok(current_block_shard_id);
+    }
+    Ok(current_block_shard_layout
+        .try_get_parent_shard_id(current_block_shard_id)
+        .map_err(|err| Error::from(near_chain::Error::from(err)))?
+        .unwrap_or(current_block_shard_id))
 }
 
 fn get_receipt_proofs_for_shard(
