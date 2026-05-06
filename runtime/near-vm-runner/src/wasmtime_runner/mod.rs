@@ -902,23 +902,6 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
                 return Ok(VMOutcome::abort(result_state, err));
             }
         };
-        // Pre-resolve the memory export so that host functions don't need to
-        // resolve it lazily via Caller::get_module_export (which can fail when
-        // the Caller's instance is a host-side trampoline for re-exported
-        // host functions). It may already be resolved if a start function
-        // triggered a host import during instantiation.
-        //
-        // Uses string-based instance.get_memory instead of
-        // instance.get_module_export due to a wasmtime issue: for modules
-        // whose only compiled functions are trampolines (no user-defined
-        // function bodies), LoadedCode::push_module stores the module in
-        // modules_with_only_trampolines, but LoadedCode::module() only
-        // searches self.modules, causing module_for_instance to panic.
-        if let Export::Unresolved(_) = store.data().memory {
-            if let Some(memory) = instance.get_memory(&mut store, MEMORY_EXPORT) {
-                store.data_mut().memory = Export::Resolved(memory);
-            }
-        }
         if let Some(global) = remaining_gas {
             let Some(Extern::Global(global)) = instance.get_module_export(&mut store, &global)
             else {
