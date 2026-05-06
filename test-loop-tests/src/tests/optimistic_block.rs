@@ -4,6 +4,7 @@ use crate::setup::env::TestLoopEnv;
 use crate::setup::peer_manager_actor::HandlerResult;
 use itertools::Itertools;
 use near_async::time::Duration;
+use near_chain::metrics as chain_metrics;
 use near_chain_configs::test_genesis::{TestEpochConfigBuilder, ValidatorsSpec};
 #[cfg(feature = "test_features")]
 use near_network::types::NetworkRequests;
@@ -339,5 +340,49 @@ fn test_optimistic_block_with_invalidated_outcome() {
     assert!(
         producer_node_hit_delta >= producer_node_height_delta,
         "Producer of the invalid OptimisticBlock must have all hits because it itself uses correct OptimisticBlock"
+    );
+}
+
+/// Regression test for the optimistic-apply / memtrie GC race.
+///
+/// One validator's `apply_chunks_optimistic` spawner is given a virtual delay
+/// of several block intervals. While the apply task waits in the queue, the
+/// chain finalizes enough blocks that `update_flat_storage_and_memtrie ->
+/// delete_memtrie_roots_up_to_height` evicts the prev-state root the delayed
+/// apply needs. The cancellation registry signals the worker before pruning;
+/// the worker bails with a recoverable error instead of panicking.
+// TODO(spice-test): Assess if this test is relevant for spice and if yes fix it.
+#[cfg_attr(feature = "protocol_feature_spice", ignore)]
+#[test]
+fn test_optimistic_apply_memtrie_gc_race() {
+    let num_shards = 3;
+
+    // Delay one node's `apply_chunks_optimistic` by several block intervals
+    // so `last_final_block` advances past the optimistic block's prev-height
+    // while the apply task is still queued.
+    let slow_node: AccountId = "account0".parse().unwrap();
+    let metric_before = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+
+    // `skip_warmup`: default warmup asserts all chunks produced in the first
+    // few blocks, too tight while one node's optimistic-apply is slowed.
+    let mut env: TestLoopEnv = get_builder(num_shards)
+        .track_all_shards()
+        .task_delay_fn(move |account, task_name| {
+            (account == &slow_node && task_name == "apply_chunks_optimistic")
+                .then(|| Duration::seconds(5))
+        })
+        .skip_warmup()
+        .build();
+
+    // `run_for` (not `run_until_head_height`): the bug is time-based — the
+    // 5s-delayed optimistic apply tasks need virtual time to fire after their
+    // memtrie roots are GC'd. A head-based condition would exit too soon.
+    env.test_loop.run_for(Duration::seconds(60));
+
+    let metric_after = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+    assert!(
+        metric_after > metric_before,
+        "race not exercised: NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES did not rise \
+         ({metric_before} -> {metric_after})",
     );
 }
