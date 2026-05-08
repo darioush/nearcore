@@ -2262,7 +2262,8 @@ impl Chain {
         if last_final_block != &CryptoHash::default() {
             let header = self.chain_store.get_block_header(last_final_block).unwrap();
             if let Some(prev_height) = header.prev_height() {
-                self.apply_chunk_cancellation_registry.signal_prune(shard_uid, prev_height);
+                self.apply_chunk_cancellation_registry
+                    .cancel_up_to_height(shard_uid, prev_height);
                 tries.delete_memtrie_roots_up_to_height(shard_uid, prev_height);
             }
         }

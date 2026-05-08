@@ -1050,7 +1050,7 @@ impl ChunkExecutorActor {
             // Signal cancellation before pruning so any in-flight apply_chunk job
             // whose dep root is about to disappear bails with a recoverable error
             // instead of panicking on missing memtrie state.
-            self.apply_chunk_cancellation_registry.signal_prune(shard_uid, prev_height);
+            self.apply_chunk_cancellation_registry.cancel_up_to_height(shard_uid, prev_height);
             tries.delete_memtrie_roots_up_to_height(shard_uid, prev_height);
         }
     }
