@@ -260,6 +260,15 @@ pub static NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES: LazyLock<IntCounter> = LazyLock:
     )
     .unwrap()
 });
+pub static APPLY_CHUNK_TASK_PANICS: LazyLock<IntCounter> = LazyLock::new(|| {
+    try_create_int_counter(
+        "near_apply_chunk_task_panics",
+        "Number of apply_chunk worker tasks that panicked and were caught \
+         by `PendingShardJobs::catch_unwind`. A regression in the memtrie \
+         GC cancellation path will increment this.",
+    )
+    .unwrap()
+});
 pub(crate) static SCHEDULED_CATCHUP_BLOCK: LazyLock<IntGauge> = LazyLock::new(|| {
     try_create_int_gauge(
         "near_catchup_scheduled_block_height",

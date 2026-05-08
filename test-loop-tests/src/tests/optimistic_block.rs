@@ -386,7 +386,8 @@ fn test_optimistic_apply_memtrie_gc_race() {
     // enough for `last_final_block` to advance past the optimistic block's
     // prev-height, triggering memtrie GC of the root the apply needs.
     let slow_node = accounts[0].clone();
-    let metric_before = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+    let failed_before = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+    let panic_before = chain_metrics::APPLY_CHUNK_TASK_PANICS.get();
 
     let mut env: TestLoopEnv = TestLoopBuilder::new()
         .genesis(genesis)
@@ -410,12 +411,30 @@ fn test_optimistic_apply_memtrie_gc_race() {
         tracing::warn!(target: "test", account = %data.account_id, height = head.height, "node chain head");
     }
 
-    let metric_after = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+    let failed_after = chain_metrics::NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES.get();
+    let panic_after = chain_metrics::APPLY_CHUNK_TASK_PANICS.get();
+
+    // The race must be exercised: at least one apply has to bail because its
+    // dep memtrie root was GC'd. Otherwise the test isn't actually testing
+    // anything (e.g. because the artificial delay didn't take effect).
     assert!(
-        metric_after > metric_before,
-        "expected at least one optimistic apply to fail because prev-state was GC'd, \
+        failed_after > failed_before,
+        "expected at least one optimistic apply to bail because its dep memtrie root was GC'd, \
          but NUM_FAILED_OPTIMISTIC_BLOCK_APPLIES did not increase ({} -> {})",
-        metric_before,
-        metric_after,
+        failed_before,
+        failed_after,
+    );
+
+    // With the cancellation fix in place, the race produces a clean recoverable
+    // error rather than a panic. Without the fix, the worker would hit
+    // `apply_chunk -> process_state_update -> StorageInconsistentState -> panic!`,
+    // which `PendingShardJobs::catch_unwind` would record here. So this counter
+    // staying flat is what distinguishes "fix is working" from "fix regressed".
+    assert_eq!(
+        panic_after,
+        panic_before,
+        "apply_chunk worker panicked ({} new panics); cancellation must catch the race \
+         before the runtime panics on missing memtrie root",
+        panic_after - panic_before,
     );
 }

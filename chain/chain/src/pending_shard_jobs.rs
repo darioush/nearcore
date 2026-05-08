@@ -63,6 +63,7 @@ impl<K: Send + 'static, R: FromPanic + Send + 'static> PendingShardJobs<K, R> {
                 let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
                     Ok(value) => value,
                     Err(payload) => {
+                        crate::metrics::APPLY_CHUNK_TASK_PANICS.inc();
                         let message = panic_payload_to_string(payload);
                         tracing::error!("{}: task panicked: {}", pending_clone.name, message);
                         R::from_panic(message)
