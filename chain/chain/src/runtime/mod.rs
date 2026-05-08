@@ -1168,8 +1168,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         // apply_chunk job owns its own handle (registered alongside the
         // closure that runs us), so two distinct jobs at the same
         // `(shard, height)` (e.g. competing forks) see only their own state.
-        let cancelled = || cancel.as_ref().is_some_and(|c| c.is_cancelled());
-        if cancelled() {
+        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
             return Err(Error::StorageError(StorageError::StorageInconsistentState(
                 "apply_chunk cancelled: memtrie root pruned by GC".into(),
             )));
@@ -1233,7 +1232,11 @@ impl RuntimeAdapter for NightshadeRuntime {
                     // handle in `cancel`; if our flag was flipped, treat the
                     // storage error as recoverable instead of panicking. Covers
                     // optimistic, fork, and catchup workers uniformly.
-                    StorageError::StorageInconsistentState(_) if cancelled() => Err(err.into()),
+                    StorageError::StorageInconsistentState(_)
+                        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) =>
+                    {
+                        Err(err.into())
+                    }
                     _ => panic!("{err}"),
                 },
                 _ => Err(e),
