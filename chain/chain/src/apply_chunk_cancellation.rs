@@ -18,7 +18,7 @@
 //!    closure and on into `apply_chunk`. The worker polls
 //!    [`is_cancelled`](ChunkApplicationCancellation::is_cancelled).
 //! 3. Just before pruning memtries, the chain calls
-//!    [`signal_prune`](ApplyChunkCancellationRegistry::signal_prune) with the
+//!    [`cancel_up_to_height`](ApplyChunkCancellationRegistry::cancel_up_to_height) with the
 //!    same height it will pass to `MemTries::delete_until_height`.
 //! 4. When `apply_chunk` returns, the cancellation is dropped and its slot is
 //!    removed from the registry.
@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Per-job cancellation handle for an in-flight `apply_chunk` worker.
 ///
 /// Plumbed into `apply_chunk` as `Option<ChunkApplicationCancellation>`. The
-/// chain flips it via [`ApplyChunkCancellationRegistry::signal_prune`] just
+/// chain flips it via [`ApplyChunkCancellationRegistry::cancel_up_to_height`] just
 /// before pruning the memtrie root the worker depends on; the worker polls
 /// [`is_cancelled`](Self::is_cancelled) and bails with a recoverable error.
 ///
@@ -112,7 +112,7 @@ impl ApplyChunkCancellationRegistry {
     /// about to be pruned. Call BEFORE invoking
     /// `ShardTries::delete_memtrie_roots_up_to_height(shard_uid, prune_height)`
     /// so workers see the flag flip before the data they need disappears.
-    pub fn signal_prune(&self, shard_uid: ShardUId, prune_height: BlockHeight) {
+    pub fn cancel_up_to_height(&self, shard_uid: ShardUId, prune_height: BlockHeight) {
         let entries = self.entries.lock();
         for entry in entries.iter() {
             if entry.shard_uid == shard_uid && entry.prev_block_height < prune_height {
@@ -148,12 +148,12 @@ mod tests {
         // Prune shard_a at 11: deletes roots inserted at heights `< 11`, i.e.
         // height 10. prev10 is cancelled; prev11 (root still alive) and
         // prev12_b (different shard) are not.
-        registry.signal_prune(shard_a, 11);
+        registry.cancel_up_to_height(shard_a, 11);
         assert!(prev10.is_cancelled());
         assert!(!prev11.is_cancelled());
         assert!(!prev12_b.is_cancelled());
 
-        registry.signal_prune(shard_a, 12);
+        registry.cancel_up_to_height(shard_a, 12);
         assert!(prev11.is_cancelled());
         assert!(!prev12_b.is_cancelled());
 
@@ -161,13 +161,13 @@ mod tests {
         // 9, 10 skipped). Pruning at 9 cancels it because `8 < 9`. Registering
         // by the block's own height instead would mis-key and miss the prune.
         let skipped_dep = registry.register(shard_a, 8);
-        registry.signal_prune(shard_a, 9);
+        registry.cancel_up_to_height(shard_a, 9);
         assert!(skipped_dep.is_cancelled());
 
         // Distinct registrations at the same key see only their own flag.
         let prev12_a_fresh = registry.register(shard_a, 12);
         assert!(!prev12_a_fresh.is_cancelled());
-        registry.signal_prune(shard_a, 13);
+        registry.cancel_up_to_height(shard_a, 13);
         assert!(prev12_a_fresh.is_cancelled());
         assert!(!prev12_b.is_cancelled(), "shard_b unaffected");
 
