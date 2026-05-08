@@ -1,3 +1,4 @@
+use crate::apply_chunk_cancellation::ApplyChunkCancellationRegistry;
 use crate::approval_verification::verify_approval_with_approvers_info;
 use crate::block_processing_utils::{
     ApplyChunksDoneWaiter, ApplyChunksStillApplying, BlockPreprocessInfo, BlockProcessingArtifact,
@@ -317,6 +318,10 @@ pub struct Chain {
     protocol_version_check: ProtocolVersionCheckConfig,
     /// Used to receive `PostStateReady` messages from the runtime.
     on_post_state_ready_sender: Option<PostStateReadySender>,
+    /// In-flight apply_chunk jobs whose dep memtrie root might be GC'd while
+    /// they run. `Chain::get_update_shard_job` registers; the GC site
+    /// (`update_flat_storage_and_memtrie`) signals before pruning.
+    pub apply_chunk_cancellation_registry: Arc<ApplyChunkCancellationRegistry>,
     #[cfg(feature = "test_features")]
     pub test_paused_blocks: crate::block_processing_utils::TestPausedBlocks,
 }
@@ -455,6 +460,7 @@ impl Chain {
             spice_core_reader,
             protocol_version_check: Default::default(),
             on_post_state_ready_sender: None,
+            apply_chunk_cancellation_registry: ApplyChunkCancellationRegistry::new(),
             #[cfg(feature = "test_features")]
             test_paused_blocks: Default::default(),
         })
@@ -637,6 +643,7 @@ impl Chain {
             spice_core_reader,
             protocol_version_check: chain_config.protocol_version_check,
             on_post_state_ready_sender,
+            apply_chunk_cancellation_registry: ApplyChunkCancellationRegistry::new(),
             #[cfg(feature = "test_features")]
             test_paused_blocks: Default::default(),
         })
@@ -2240,12 +2247,15 @@ impl Chain {
             }
         }
 
-        // Garbage collect memtrie roots.
+        // Garbage collect memtrie roots. Signal cancellation BEFORE pruning so any
+        // in-flight apply_chunk job whose dep root is about to disappear bails
+        // with a recoverable error instead of panicking on missing memtrie state.
         let tries = self.runtime_adapter.get_tries();
         let last_final_block = block.header().last_final_block();
         if last_final_block != &CryptoHash::default() {
             let header = self.chain_store.get_block_header(last_final_block).unwrap();
             if let Some(prev_height) = header.prev_height() {
+                self.apply_chunk_cancellation_registry.signal_prune(shard_uid, prev_height);
                 tries.delete_memtrie_roots_up_to_height(shard_uid, prev_height);
             }
         }
@@ -3380,17 +3390,14 @@ impl Chain {
 
         // Register this in-flight apply_chunk job so memtrie GC can cancel us if the
         // prev_block memtrie root we depend on is about to be pruned. We register at
-        // `prev_block.header().height()` — the height at which the memtrie root we
-        // need was inserted — NOT `block.height`, since they differ when heights are
-        // skipped and the cancel predicate must match `MemTries::delete_until_height`'s
-        // boundary exactly. The handle is moved into the spawned closure so it
-        // deregisters on completion; its `flag()` is plumbed into apply_chunk as a
-        // separate parameter so two competing forks each see only their own flag.
-        let cancel_handle = self
-            .runtime_adapter
-            .get_tries()
-            .register_apply_chunk(shard_uid, prev_block.header().height());
-        let cancel_flag = cancel_handle.flag();
+        // `prev_block.header().height()` (the height at which the dep memtrie root
+        // was inserted), NOT `block.height` — they differ when heights are skipped,
+        // and the cancel predicate must match `MemTries::delete_until_height`'s
+        // boundary exactly. The handle is moved into the spawned closure and
+        // dropped when `apply_chunk` returns, removing its registry slot.
+        let cancellation = self
+            .apply_chunk_cancellation_registry
+            .register(shard_uid, prev_block.header().height());
 
         let chunk_header = chunk_headers.get(shard_index).ok_or(Error::InvalidShardId(shard_id))?;
         let is_new_chunk = chunk_header.is_new_chunk(block_height);
@@ -3498,17 +3505,13 @@ impl Chain {
             shard_id,
             cached_shard_update_key,
             Box::new(move |parent_span| -> Result<ShardUpdateResult, Error> {
-                // The cancel handle is moved into this closure so it lives exactly as
-                // long as the worker job; on closure return its slot is removed from
-                // the `ShardTries` registry.
-                let _cancel_handle = cancel_handle;
                 Ok(process_shard_update(
                     parent_span,
                     runtime.as_ref(),
                     shard_update_reason,
                     shard_context,
                     on_post_state_ready,
-                    Some(cancel_flag),
+                    Some(cancellation),
                 )?)
             }),
         )))
