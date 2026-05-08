@@ -10,6 +10,7 @@ use near_async::messaging::Sender;
 use near_chain::BlockHeader;
 use near_chain::ChainStoreAccess;
 use near_chain::PendingShardJobs;
+use near_chain::apply_chunk_cancellation::ApplyChunkCancellationRegistry;
 use near_chain::chain::{NewChunkData, NewChunkResult, ShardContext, StorageContext};
 use near_chain::sharding::get_receipts_shuffle_salt;
 use near_chain::sharding::shuffle_receipt_proofs;
@@ -110,6 +111,10 @@ pub struct ChunkExecutorActor {
 
     pub(crate) validator_signer: MutableValidatorSigner,
     pub(crate) core_reader: SpiceCoreReader,
+    /// Registry of in-flight apply_chunk jobs scoped to this actor. Independent
+    /// from `Chain::apply_chunk_cancellation_registry`: in SPICE mode, only
+    /// this actor applies chunks and prunes memtries, so it owns its own.
+    apply_chunk_cancellation_registry: Arc<ApplyChunkCancellationRegistry>,
 }
 
 impl ChunkExecutorActor {
@@ -148,6 +153,7 @@ impl ChunkExecutorActor {
             data_distributor_adapter,
             core_writer_sender,
             pending_unverified_receipts: HashMap::new(),
+            apply_chunk_cancellation_registry: ApplyChunkCancellationRegistry::new(),
         }
     }
 
@@ -903,6 +909,8 @@ impl ChunkExecutorActor {
 
         let runtime = self.runtime_adapter.clone();
         let shard_uid = chunk_context.shard_uid;
+        let cancellation =
+            self.apply_chunk_cancellation_registry.register(shard_uid, prev_block_header.height());
         Ok((
             shard_uid.shard_id(),
             Box::new(move |parent_span| -> Result<ShardUpdateResult, Error> {
@@ -912,7 +920,7 @@ impl ChunkExecutorActor {
                     shard_update_reason,
                     ShardContext { shard_uid, should_apply_chunk: true },
                     None,
-                    None,
+                    Some(cancellation),
                 )?)
             }),
         ))
@@ -1037,8 +1045,12 @@ impl ChunkExecutorActor {
         let Some(prev_height) = header.prev_height() else {
             return;
         };
+        let tries = self.runtime_adapter.get_tries();
         for shard_uid in shard_layout.shard_uids() {
-            let tries = self.runtime_adapter.get_tries();
+            // Signal cancellation before pruning so any in-flight apply_chunk job
+            // whose dep root is about to disappear bails with a recoverable error
+            // instead of panicking on missing memtrie state.
+            self.apply_chunk_cancellation_registry.signal_prune(shard_uid, prev_height);
             tries.delete_memtrie_roots_up_to_height(shard_uid, prev_height);
         }
     }

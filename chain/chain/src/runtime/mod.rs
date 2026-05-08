@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::apply_chunk_cancellation::ChunkApplicationCancellation;
 use crate::runtime::signer_overlay::SignerOverlay;
 use crate::types::{
     ApplyChunkBlockContext, ApplyChunkResult, ApplyChunkShardContext, HasContract,
@@ -1155,20 +1156,19 @@ impl RuntimeAdapter for NightshadeRuntime {
         block: ApplyChunkBlockContext,
         receipts: &[Receipt],
         transactions: SignedValidPeriodTransactions,
-        cancel: Option<Arc<AtomicBool>>,
+        cancel: Option<ChunkApplicationCancellation>,
     ) -> Result<ApplyChunkResult, Error> {
         let shard_id = chunk.shard_id;
         let _timer = metrics::APPLYING_CHUNKS_TIME
             .with_label_values(&[&apply_reason.to_string(), &shard_id.to_string()])
             .start_timer();
 
-        // The `cancel` flag (if any) is flipped by
-        // `ShardTries::delete_memtrie_roots_up_to_height` when the prev_block
-        // memtrie root we depend on is about to be pruned. Each apply_chunk job
-        // owns its own `Arc<AtomicBool>` (registered in `get_update_shard_job`),
-        // so two distinct jobs at the same `(shard, height)` (e.g. competing
-        // forks) see only their own state.
-        let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
+        // The `cancel` handle (if any) is flipped by the chain when the
+        // prev_block memtrie root we depend on is about to be pruned. Each
+        // apply_chunk job owns its own handle (registered alongside the
+        // closure that runs us), so two distinct jobs at the same
+        // `(shard, height)` (e.g. competing forks) see only their own state.
+        let cancelled = || cancel.as_ref().is_some_and(|c| c.is_cancelled());
         if cancelled() {
             return Err(Error::StorageError(StorageError::StorageInconsistentState(
                 "apply_chunk cancelled: memtrie root pruned by GC".into(),
@@ -1228,10 +1228,10 @@ impl RuntimeAdapter for NightshadeRuntime {
                     | StorageError::MissingTrieValue(..) => Err(err.into()),
                     // The memtrie root for prev_block can be pruned by
                     // `delete_memtrie_roots_up_to_height` while a slow apply_chunk
-                    // job is still in flight (e.g. during a cold Wasmtime compile).
-                    // The GC site signals cancellation via the per-job flag in
-                    // `block.cancel`; if our flag was flipped, treat the storage
-                    // error as recoverable instead of panicking. Covers
+                    // job is still in flight (e.g. during a cold Wasmtime
+                    // compile). The chain signals cancellation via the per-job
+                    // handle in `cancel`; if our flag was flipped, treat the
+                    // storage error as recoverable instead of panicking. Covers
                     // optimistic, fork, and catchup workers uniformly.
                     StorageError::StorageInconsistentState(_) if cancelled() => Err(err.into()),
                     _ => panic!("{err}"),

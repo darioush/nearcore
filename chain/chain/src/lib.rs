@@ -23,6 +23,7 @@ pub use store::{
 pub use store_validator::{ErrorMessage, StoreValidator};
 pub use types::{Block, BlockHeader, BlockStatus, ChainGenesis, LatestKnown, Provenance};
 
+pub mod apply_chunk_cancellation;
 mod approval_verification;
 pub mod backfill_receipt_to_tx;
 mod block_processing_utils;
