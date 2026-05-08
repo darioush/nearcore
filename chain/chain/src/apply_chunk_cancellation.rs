@@ -45,8 +45,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// lifetime.
 pub struct ChunkApplicationCancellation {
     flag: Arc<AtomicBool>,
-    shard_uid: ShardUId,
-    prev_block_height: BlockHeight,
     registry: Arc<ApplyChunkCancellationRegistry>,
 }
 
@@ -58,12 +56,11 @@ impl ChunkApplicationCancellation {
 
 impl Drop for ChunkApplicationCancellation {
     fn drop(&mut self) {
+        // Identify our slot by Arc identity. Two distinct registrations at the
+        // same `(shard_uid, prev_block_height)` (e.g. competing forks) get
+        // distinct flag Arcs, so ptr_eq picks ours and only ours.
         let mut entries = self.registry.entries.lock();
-        if let Some(pos) = entries.iter().position(|entry| {
-            entry.shard_uid == self.shard_uid
-                && entry.prev_block_height == self.prev_block_height
-                && Arc::ptr_eq(&entry.flag, &self.flag)
-        }) {
+        if let Some(pos) = entries.iter().position(|entry| Arc::ptr_eq(&entry.flag, &self.flag)) {
             entries.swap_remove(pos);
         }
     }
@@ -105,7 +102,7 @@ impl ApplyChunkCancellationRegistry {
     ) -> ChunkApplicationCancellation {
         let flag = Arc::new(AtomicBool::new(false));
         self.entries.lock().push(Entry { shard_uid, prev_block_height, flag: flag.clone() });
-        ChunkApplicationCancellation { flag, shard_uid, prev_block_height, registry: self.clone() }
+        ChunkApplicationCancellation { flag, registry: self.clone() }
     }
 
     /// Signal cancellation to any in-flight job whose dep memtrie root is
