@@ -1,6 +1,7 @@
 ---
 source: core/parameters/src/view.rs
 expression: "&view"
+snapshot_kind: text
 ---
 {
   "storage_amount_per_byte": "10000000000000000000",
@@ -246,6 +247,7 @@ expression: "&view"
       "max_blocks_per_function": 5000,
       "max_blocks_per_contract": 50000,
       "max_types_per_contract": 1024,
+      "max_operand_stack_height": 1024,
       "account_id_validity_rules_version": 2,
       "yield_timeout_length_in_blocks": 200,
       "max_yield_payload_size": 1024,

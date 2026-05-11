@@ -149,6 +149,10 @@ pub struct LimitConfig {
     /// a contract may declare.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_types_per_contract: Option<u64>,
+    /// If present, caps the maximum operand-stack height observed within any
+    /// single function during validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_operand_stack_height: Option<u64>,
     /// Whether to enforce account_id well-formed-ness where it wasn't enforced
     /// historically.
     #[serde(default = "AccountIdValidityRulesVersion::v0")]

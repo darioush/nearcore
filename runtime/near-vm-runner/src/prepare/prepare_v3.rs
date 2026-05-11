@@ -15,6 +15,7 @@ struct PrepareContext<'a> {
     table_limit: u32,
     table_element_limit: u64,
     type_limit: u64,
+    operand_stack_height_limit: Option<u64>,
     validator: wp::Validator,
     func_validator_allocations: wp::FuncValidatorAllocations,
     before_import_section: bool,
@@ -44,6 +45,7 @@ impl<'a> PrepareContext<'a> {
             table_limit: limits.max_tables_per_contract.unwrap_or(u32::MAX),
             table_element_limit,
             type_limit: limits.max_types_per_contract.unwrap_or(u64::MAX),
+            operand_stack_height_limit: limits.max_operand_stack_height,
             validator: wp::Validator::new_with_features(features.into()),
             func_validator_allocations: wp::FuncValidatorAllocations::default(),
             before_import_section: true,
@@ -266,7 +268,7 @@ impl<'a> PrepareContext<'a> {
                         wp::FuncValidatorAllocations::default(),
                     );
                     let mut func_validator = func_validator.into_validator(allocs);
-                    func_validator.validate(&func).map_err(|_| PrepareError::Deserialization)?;
+                    self.validate_func_body(&mut func_validator, &func)?;
                     self.func_validator_allocations = func_validator.into_allocations();
                 }
                 wp::Payload::CustomSection(reader) => {
@@ -298,6 +300,30 @@ impl<'a> PrepareContext<'a> {
         }
         self.ensure_export_section();
         Ok(std::mem::replace(&mut self.output_code, Vec::new()))
+    }
+
+    fn validate_func_body(
+        &self,
+        func_validator: &mut wp::FuncValidator<wp::ValidatorResources>,
+        body: &wp::FunctionBody<'_>,
+    ) -> Result<(), PrepareError> {
+        let mut reader = body.get_binary_reader();
+        func_validator.read_locals(&mut reader).map_err(|_| PrepareError::Deserialization)?;
+        while !reader.eof() {
+            let pos = reader.original_position();
+            let op = reader.read_operator().map_err(|_| PrepareError::Deserialization)?;
+            func_validator.op(pos, &op).map_err(|_| PrepareError::Deserialization)?;
+            if let Some(limit) = self.operand_stack_height_limit {
+                if u64::from(func_validator.operand_stack_height()) > limit {
+                    tracing::debug!(target: "vm", limit, "operand stack depth exceeds the limit");
+                    return Err(PrepareError::OperandStackTooDeep);
+                }
+            }
+        }
+        func_validator
+            .finish(reader.original_position())
+            .map_err(|_| PrepareError::Deserialization)?;
+        Ok(())
     }
 
     fn transform_import_section(

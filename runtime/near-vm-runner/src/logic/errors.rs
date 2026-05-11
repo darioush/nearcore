@@ -193,6 +193,8 @@ pub enum PrepareError {
     TooManyBlocksPerContract = 14,
     /// Contract declares too many entries in the wasm type section.
     TooManyTypes = 15,
+    /// A function's operand-stack depth exceeds the configured limit.
+    OperandStackTooDeep = 16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr)]
@@ -428,6 +430,7 @@ impl fmt::Display for PrepareError {
             TooManyBlocksPerFunction => "Too many basic blocks in a function.",
             TooManyBlocksPerContract => "Too many basic blocks in a contract.",
             TooManyTypes => "Too many type-section entries declared in the contract.",
+            OperandStackTooDeep => "Operand stack depth exceeds the limit.",
         })
     }
 }

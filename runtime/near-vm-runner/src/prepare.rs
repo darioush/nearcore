@@ -353,6 +353,59 @@ mod tests {
         });
     }
 
+    fn contract_with_operand_stack(height: u32) -> Vec<u8> {
+        use wasm_encoder::{
+            CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+            TypeSection,
+        };
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut exports = ExportSection::new();
+        exports.export("main", ExportKind::Func, 0);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut f = Function::new([]);
+        for _ in 0..height {
+            f.instruction(&Instruction::I64Const(0));
+        }
+        for _ in 0..height {
+            f.instruction(&Instruction::Drop);
+        }
+        f.instruction(&Instruction::End);
+        code.function(&f);
+        module.section(&code);
+        module.finish()
+    }
+
+    #[test]
+    fn max_operand_stack_height() {
+        with_vm_variants(|kind| {
+            let mut config = test_vm_config(Some(kind));
+            // The limit is only enforced on the prepare_v3 path.
+            config.reftypes_bulk_memory = true;
+            let limit: u64 = 100;
+            config.limit_config.max_operand_stack_height = Some(limit);
+
+            let wasm = contract_with_operand_stack(limit as u32 + 1);
+            let r = prepare_contract(&wasm, &config, kind);
+            assert_matches!(r, Err(PrepareError::OperandStackTooDeep));
+
+            let wasm = contract_with_operand_stack(limit as u32);
+            let r = prepare_contract(&wasm, &config, kind);
+            assert_matches!(r, Ok(_));
+
+            config.limit_config.max_operand_stack_height = None;
+            let wasm = contract_with_operand_stack(limit as u32 + 50);
+            let r = prepare_contract(&wasm, &config, kind);
+            assert_matches!(r, Ok(_));
+        });
+    }
+
     #[test]
     fn instrumented_code_too_large() {
         with_vm_variants(|kind| {
