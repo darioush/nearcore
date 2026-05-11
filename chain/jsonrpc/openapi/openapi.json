@@ -11246,6 +11246,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "max_operand_stack_height": {
+            "description": "If present, caps the maximum operand-stack height observed within any\nsingle function during validation.",
+            "format": "uint64",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
           "max_promises_per_function_call_action": {
             "description": "Max number of promises that a function call can create",
             "format": "uint64",
@@ -11905,6 +11912,13 @@
             "description": "Contract declares too many entries in the wasm type section.",
             "enum": [
               "TooManyTypes"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "A function's operand-stack depth exceeds the configured limit.",
+            "enum": [
+              "OperandStackTooDeep"
             ],
             "type": "string"
           }
