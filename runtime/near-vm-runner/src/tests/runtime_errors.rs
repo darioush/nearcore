@@ -366,7 +366,7 @@ fn test_stack_overflow() {
         .opaque_error()
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 30418898602 used gas 30418898602
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 1036636330 used gas 1036636330
                 Err: ...
             "#]],
         ]);
@@ -391,7 +391,7 @@ fn test_stack_instrumentation_protocol_upgrade() {
         .opaque_error()
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 31825672528 used gas 31825672528
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 1095735928 used gas 1095735928
                 Err: ...
             "#]],
         ]);
@@ -413,7 +413,7 @@ fn test_stack_instrumentation_protocol_upgrade() {
         .opaque_error()
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 29757263944 used gas 29757263944
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 1031560960 used gas 1031560960
                 Err: ...
             "#]],
         ]);

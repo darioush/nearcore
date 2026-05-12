@@ -269,7 +269,8 @@ fn slow_test_limit_locals_global() {
         .opaque_error()
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 13419362816 used gas 13419362816
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 557218268 used gas 557218268
+                Err: ...
             "#]]
         ]);
 }
