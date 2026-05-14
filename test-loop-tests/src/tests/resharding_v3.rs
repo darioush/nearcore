@@ -1,7 +1,7 @@
 use crate::setup::builder::TestLoopBuilder;
 use crate::setup::drop_condition::DropCondition;
 use crate::setup::env::TestLoopEnv;
-use crate::utils::loop_action::{LoopAction, LoopActionStatus};
+use crate::utils::loop_action::{LoopAction, LoopActionFn, LoopActionStatus};
 use crate::utils::receipts::{
     ReceiptKind, check_receipts_presence_after_resharding_block,
     check_receipts_presence_at_resharding_block,
@@ -164,6 +164,12 @@ struct TestReshardingParameters {
     num_epochs_to_wait: u64,
     /// If set, proceed with second resharding using the provided boundary account.
     second_resharding_boundary_account: Option<AccountId>,
+    /// Optional per-`(account, task_name)` virtual delay applied to test-loop
+    /// spawners. Used by repros that need a task to sit in the queue across a
+    /// resharding boundary.
+    #[builder(setter(custom))]
+    task_delay_fn:
+        Option<Arc<dyn Fn(&AccountId, &str) -> Option<Duration> + Send + Sync + 'static>>,
 }
 
 impl TestReshardingParametersBuilder {
@@ -303,7 +309,16 @@ impl TestReshardingParametersBuilder {
             second_resharding_boundary_account: self
                 .second_resharding_boundary_account
                 .unwrap_or(None),
+            task_delay_fn: self.task_delay_fn.unwrap_or(None),
         }
+    }
+
+    fn task_delay_fn(
+        mut self,
+        delay_fn: impl Fn(&AccountId, &str) -> Option<Duration> + Send + Sync + 'static,
+    ) -> Self {
+        self.task_delay_fn = Some(Some(Arc::new(delay_fn)));
+        self
     }
 
     fn add_loop_action(mut self, loop_action: LoopAction) -> Self {
@@ -662,6 +677,10 @@ fn test_resharding_v3_base(params: TestReshardingParameters) {
         builder = builder.track_all_shards();
     }
 
+    if let Some(delay_fn) = params.task_delay_fn.clone() {
+        builder = builder.task_delay_fn(move |account, task_name| delay_fn(account, task_name));
+    }
+
     if params.limit_outgoing_gas || params.short_yield_timeout {
         // RuntimeConfig::test() sets yield_timeout_length_in_blocks to a lower value
         // (TEST_CONFIG_YIELD_TIMEOUT_LENGTH = 10). No need to set it manually for short_yield_timeout.
@@ -936,6 +955,78 @@ fn test_resharding_v3_base(params: TestReshardingParameters) {
 #[cfg_attr(feature = "protocol_feature_spice", ignore)]
 fn slow_test_resharding_v3() {
     test_resharding_v3_base(TestReshardingParametersBuilder::default().build());
+}
+
+/// Repro for the case where a `MemTrieRootPin` outlives a resharding event.
+/// Delays `apply_chunks_optimistic` on one block producer so its pin is still
+/// alive when `freeze_parent_memtrie` replaces the parent shard's MemTries at
+/// the epoch boundary. The delayed task's pin drop triggers the
+/// `debug_assert!` in `delete_root` (caught by `catch_unwind`), which surfaces
+/// as a failed optimistic-block apply counted by the per-Chain counter.
+#[test]
+#[cfg(feature = "test_features")]
+#[cfg_attr(feature = "protocol_feature_spice", ignore)]
+fn slow_test_resharding_v3_pin_survives_freeze() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let slow_account: AccountId = "account0".parse().unwrap();
+    let delay_enabled = Arc::new(AtomicBool::new(false));
+    let delay_enabled_for_fn = delay_enabled.clone();
+    let slow_account_for_fn = slow_account.clone();
+    let task_delay_fn = move |account: &AccountId, task_name: &str| {
+        if !delay_enabled_for_fn.load(Ordering::Relaxed) {
+            return None;
+        }
+        if account == &slow_account_for_fn && task_name == "apply_chunks_optimistic" {
+            Some(Duration::seconds(5))
+        } else {
+            None
+        }
+    };
+
+    let (trigger_succeeded, trigger_flag) = LoopAction::shared_success_flag();
+    let delay_enabled_for_action = delay_enabled.clone();
+    let trigger_action: LoopActionFn = Box::new(move |node_datas, test_loop_data, _account_id| {
+        if delay_enabled_for_action.load(Ordering::Relaxed) {
+            return;
+        }
+        let head_height = {
+            let client_handle = node_datas[0].client_sender.actor_handle();
+            test_loop_data.get(&client_handle).client.chain.head().unwrap().height
+        };
+        if head_height >= 60 {
+            delay_enabled_for_action.store(true, Ordering::Relaxed);
+            trigger_flag.set(true);
+        }
+    });
+
+    let (counter_succeeded, counter_flag) = LoopAction::shared_success_flag();
+    let counter_action: LoopActionFn = Box::new(move |node_datas, test_loop_data, _account_id| {
+        for node_data in node_datas {
+            let handle = node_data.client_sender.actor_handle();
+            let client = &test_loop_data.get(&handle).client;
+            let signer = client.validator_signer.get().unwrap();
+            if signer.validator_id() == &slow_account {
+                let failed = client.chain.failed_optimistic_block_applies.load(Ordering::Relaxed);
+                if failed > 0 {
+                    delay_enabled.store(false, Ordering::Relaxed);
+                    counter_flag.set(true);
+                }
+                break;
+            }
+        }
+    });
+
+    test_resharding_v3_base(
+        TestReshardingParametersBuilder::default()
+            .track_all_shards(true)
+            .disable_temporary_account_test(true)
+            .epoch_length(15)
+            .task_delay_fn(task_delay_fn)
+            .add_loop_action(LoopAction::new(trigger_action, trigger_succeeded))
+            .add_loop_action(LoopAction::new(counter_action, counter_succeeded))
+            .build(),
+    );
 }
 
 #[test]
