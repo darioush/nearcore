@@ -86,3 +86,63 @@ fn test_load_memtrie_after_empty_chunks() {
         .load_memtrie(&shard_uid, None, true)
         .expect("Couldn't load memtrie");
 }
+
+/// Reproduces the race between in-flight optimistic-block apply and memtrie root GC.
+///
+/// An apply task clones `Arc<RwLock<MemTries>>` inside `get_trie_for_shard`, then later
+/// resolves the prev_state_root via `MemTries::get_root`. If memtrie GC runs between those
+/// two steps and evicts the root, the apply fails with `StorageInconsistentState`.
+///
+/// The test parks all nodes' OB applies at a breakpoint, lets the chain skip that height
+/// and advance far enough for natural GC to evict the stale roots, then resumes the
+/// parked applies and checks `RuntimeAdapter::chunk_apply_fatal_error_count`.
+#[test]
+#[cfg(feature = "test_features")]
+fn test_ob_apply_panics_when_root_gced() {
+    init_test_logger();
+
+    let accounts: Vec<AccountId> =
+        (0..4).map(|i| format!("account{}", i).parse().unwrap()).collect();
+
+    let mut env = TestLoopBuilder::new()
+        .num_shards(1)
+        .validators(accounts.len(), 0)
+        .add_user_accounts(&accounts, Balance::from_near(1_000_000))
+        .enable_yield_points()
+        .build();
+
+    // Arm a breakpoint that parks ALL optimistic-block applies. With every node's OB
+    // parked, the normal block at that height is queued (BlockPendingOptimisticExecution)
+    // on every node. The next block producer builds on the previous height, skipping it.
+    // The chain then advances past the parked height and natural GC evicts the stale root.
+    let bp = env
+        .test_loop
+        .breakpoint("after_trie_for_apply")
+        .when(|ctx| ctx.get("block_type") == Some("Optimistic"))
+        .arm();
+
+    env.test_loop.run_until(|_| bp.hit_count() == accounts.len(), Duration::seconds(10));
+    let all_hits = bp.drain_hits();
+
+    // Disarm so subsequent OB applies (at higher heights) flow through.
+    drop(bp);
+
+    // Advance the chain far enough for natural GC to evict the parked memtrie roots.
+    env.test_loop.run_for(Duration::seconds(10));
+
+    // Resume all parked OB applies. Each tries to look up a state root that GC has evicted.
+    for hit in all_hits {
+        hit.resume();
+    }
+    env.test_loop.run_for(Duration::seconds(1));
+
+    let error_count: usize = env
+        .node_datas
+        .iter()
+        .map(|nd| {
+            let client = &env.test_loop.data.get(&nd.client_sender.actor_handle()).client;
+            client.runtime_adapter.chunk_apply_fatal_error_count()
+        })
+        .sum();
+    assert_eq!(error_count, accounts.len());
+}

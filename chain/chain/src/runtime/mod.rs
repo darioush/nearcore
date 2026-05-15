@@ -7,6 +7,7 @@ use crate::types::{
     StatePartValidationResult, StateRootNodeValidationResult, StorageDataSource, Tip,
 };
 use errors::FromStateViewerErrors;
+use near_async::test_loop_yield;
 use near_async::thread_pool::contract_compilation_pool;
 use near_async::time::{Duration, Instant};
 use near_chain_configs::{GenesisConfig, MIN_GC_NUM_EPOCHS_TO_KEEP, ProtocolConfig};
@@ -62,6 +63,8 @@ use node_runtime::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(feature = "test_features")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::instrument;
@@ -90,6 +93,8 @@ pub struct NightshadeRuntime {
     state_parts_compression_lvl: i32,
     is_cloud_archival_writer: bool,
     save_receipt_to_tx: bool,
+    #[cfg(feature = "test_features")]
+    pub chunk_apply_fatal_error_count: AtomicUsize,
 }
 
 impl NightshadeRuntime {
@@ -148,6 +153,8 @@ impl NightshadeRuntime {
             state_parts_compression_lvl,
             is_cloud_archival_writer,
             save_receipt_to_tx,
+            #[cfg(feature = "test_features")]
+            chunk_apply_fatal_error_count: AtomicUsize::new(0),
         })
     }
 
@@ -1194,6 +1201,13 @@ impl RuntimeAdapter for NightshadeRuntime {
             ),
         };
 
+        test_loop_yield!(
+            "after_trie_for_apply",
+            shard_id = shard_id,
+            height = block.height,
+            block_type = format!("{:?}", block.block_type),
+        );
+
         // StateWitnessSizeLimit: We need to start recording reads if the stateless validation is
         // enabled in the next epoch. We need to save the state transition data in the current epoch
         // to be able to produce the state witness in the next epoch.
@@ -1218,7 +1232,12 @@ impl RuntimeAdapter for NightshadeRuntime {
                 Error::StorageError(err) => match &err {
                     StorageError::FlatStorageBlockNotSupported(_)
                     | StorageError::MissingTrieValue(..) => Err(err.into()),
-                    _ => panic!("{err}"),
+                    _ => {
+                        #[cfg(feature = "test_features")]
+                        self.chunk_apply_fatal_error_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        panic!("{err}");
+                    }
                 },
                 _ => Err(e),
             },
@@ -1596,6 +1615,11 @@ impl RuntimeAdapter for NightshadeRuntime {
         drop(tx);
         while rx.recv().is_ok() {}
         Ok(())
+    }
+
+    #[cfg(feature = "test_features")]
+    fn chunk_apply_fatal_error_count(&self) -> usize {
+        self.chunk_apply_fatal_error_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

@@ -684,6 +684,9 @@ pub trait RuntimeAdapter: Send + Sync {
         epoch_id: &EpochId,
         contract_codes: Vec<ContractCode>,
     ) -> Result<(), Error>;
+
+    #[cfg(feature = "test_features")]
+    fn chunk_apply_fatal_error_count(&self) -> usize;
 }
 
 /// The last known / checked height and time when we have processed it.
