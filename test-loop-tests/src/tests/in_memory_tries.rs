@@ -288,3 +288,139 @@ fn test_ob_apply_panics_when_parent_memtrie_frozen() {
         .sum();
     assert_eq!(error_count, num_parked);
 }
+
+/// Same race as `test_ob_apply_panics_when_parent_memtrie_frozen`, but triggered via a chain
+/// fork instead of optimistic blocks.
+///
+/// A single node double-signs at the resharding boundary, producing two competing blocks at
+/// the same height with different parents. The fork block's shard 6 apply clones
+/// `Arc<RwLock<MemTries>>` and is parked at a breakpoint. The canonical block then processes
+/// normally: its postprocess calls `freeze_parent_memtrie`, replacing the MemTries contents
+/// inside the same Arc. When the parked fork apply resumes, it sees empty MemTries and fails.
+#[test]
+#[cfg(feature = "test_features")]
+fn test_fork_apply_panics_when_parent_memtrie_frozen() {
+    use crate::utils::setups::derive_new_epoch_config_from_boundary;
+    use near_chain_configs::test_genesis::TestGenesisBuilder;
+    use near_client::client_actor::AdvProduceBlockHeightSelection;
+    use near_primitives::epoch_manager::EpochConfigStore;
+    use near_primitives::version::PROTOCOL_VERSION;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    init_test_logger();
+
+    let epoch_length: u64 = 10;
+    let num_accounts = 4;
+    let accounts: Vec<AccountId> =
+        (0..num_accounts).map(|i| format!("account{}", i).parse().unwrap()).collect();
+
+    let base_protocol_version = PROTOCOL_VERSION - 2;
+    let base_shard_layout = {
+        let boundary_accounts = vec!["account1".parse().unwrap(), "account3".parse().unwrap()];
+        let shard_ids = vec![ShardId::new(5), ShardId::new(3), ShardId::new(6)];
+        let shards_split_map = [(ShardId::new(0), shard_ids.clone())].into_iter().collect();
+        ShardLayout::v2(boundary_accounts, shard_ids, Some(shards_split_map))
+    };
+    let mut base_epoch_config = EpochConfigStore::for_chain_id("mainnet", None)
+        .unwrap()
+        .get_config(base_protocol_version)
+        .as_ref()
+        .clone();
+    base_epoch_config.num_block_producer_seats = 1;
+    base_epoch_config.num_chunk_producer_seats = 1;
+    base_epoch_config.num_chunk_validator_seats = 1;
+    let base_epoch_config = base_epoch_config.with_shard_layout(base_shard_layout.clone());
+
+    let new_boundary_account: AccountId = "account6".parse().unwrap();
+    let (new_epoch_config, _) =
+        derive_new_epoch_config_from_boundary(&base_epoch_config, &new_boundary_account);
+
+    let epoch_config_store = EpochConfigStore::test(BTreeMap::from([
+        (base_protocol_version, Arc::new(base_epoch_config)),
+        (base_protocol_version + 1, Arc::new(new_epoch_config)),
+    ]));
+
+    let builder = TestLoopBuilder::new();
+    let genesis = TestGenesisBuilder::new()
+        .genesis_time_from_clock(&builder.clock())
+        .shard_layout(base_shard_layout)
+        .protocol_version(base_protocol_version)
+        .epoch_length(epoch_length)
+        .validators_spec(ValidatorsSpec::desired_roles(&[accounts[0].as_str()], &[]))
+        .add_user_accounts_simple(&accounts, Balance::from_near(1_000_000))
+        .build();
+
+    let mut env = builder
+        .genesis(genesis)
+        .epoch_config_store(epoch_config_store)
+        .clients(vec![accounts[0].clone()])
+        .track_all_shards()
+        .enable_yield_points()
+        .config_modifier(|config, _| {
+            let mut resharding_config = config.resharding_config.get();
+            resharding_config.batch_delay = Duration::milliseconds(1);
+            config.resharding_config.update(resharding_config);
+        })
+        .build();
+
+    // Advance to height 20 (one before the resharding boundary at height 21).
+    let client_handle = env.node_datas[0].client_sender.actor_handle();
+    env.test_loop.run_until(
+        |data| data.get(&client_handle).client.chain.head().unwrap().height >= 20,
+        Duration::seconds(15),
+    );
+
+    // Arm breakpoint for shard 6 Normal applies. The fork block's apply will be the first
+    // hit; we take it and disarm so the canonical block's apply flows through.
+    let bp = env
+        .test_loop
+        .breakpoint("after_trie_for_apply")
+        .when(|ctx| ctx.get("block_type") == Some("Normal") && ctx.get("shard_id") == Some("6"))
+        .arm();
+
+    // Produce a fork block at the resharding boundary: height 21 based on height 19
+    // (skipping 20 to avoid double signing). This creates a competing block whose parent
+    // differs from the canonical chain.
+    let fork_producer_handle = env.node_datas[0].client_sender.actor_handle();
+    env.test_loop.send_adhoc_event("produce_fork".to_string(), move |data| {
+        let client_actor = data.get_mut(&fork_producer_handle);
+        client_actor.adv_produce_blocks_on(
+            1,
+            true,
+            AdvProduceBlockHeightSelection::SelectedHeightOnSelectedBlock {
+                produced_block_height: 21,
+                base_block_height: 19,
+            },
+        );
+    });
+
+    // Wait for the fork block's shard 6 apply to hit the breakpoint.
+    env.test_loop.run_until(|_| bp.hit_count() >= 1, Duration::seconds(10));
+    let fork_hit = bp.take_hit().unwrap();
+    drop(bp);
+
+    // Advance the canonical chain through the resharding boundary. The canonical block at
+    // height 21 (with parent 20) processes normally, and its postprocess calls
+    // freeze_parent_memtrie, replacing s6's MemTries inside the same Arc the fork apply holds.
+    let client_handle = env.node_datas[0].client_sender.actor_handle();
+    env.test_loop.run_until(
+        |data| data.get(&client_handle).client.chain.head().unwrap().height >= 30,
+        Duration::seconds(30),
+    );
+
+    // Verify resharding happened.
+    let client = &env.test_loop.data.get(&client_handle).client;
+    let tip = client.chain.head().unwrap();
+    let shard_layout = client.epoch_manager.get_shard_layout(&tip.epoch_id).unwrap();
+    assert_eq!(shard_layout.num_shards(), 4, "expected 4 shards after resharding");
+
+    // Resume the parked fork apply. It tries to look up the state root in the now-empty
+    // MemTries and fails.
+    fork_hit.resume();
+    env.test_loop.run_for(Duration::seconds(1));
+
+    let client = &env.test_loop.data.get(&env.node_datas[0].client_sender.actor_handle()).client;
+    let error_count = client.runtime_adapter.chunk_apply_fatal_error_count();
+    assert!(error_count >= 1, "expected at least 1 fatal error from fork apply, got {error_count}");
+}
