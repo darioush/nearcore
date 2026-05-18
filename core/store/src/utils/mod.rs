@@ -401,6 +401,7 @@ pub fn remove_account(
     let mut gas_key_nonce_total_key_bytes: usize = 0;
 
     // Removing access keys and gas key nonces
+    near_async::test_loop_yield!("before_remove_account_iter", account_id = account_id);
     let lock = state_update.trie().lock_for_iter();
     let mut keys_to_remove: Vec<TrieKey> = Vec::new();
     for raw_key in state_update

@@ -424,3 +424,156 @@ fn test_fork_apply_panics_when_parent_memtrie_frozen() {
     let error_count = client.runtime_adapter.chunk_apply_fatal_error_count();
     assert!(error_count >= 1, "expected at least 1 fatal error from fork apply, got {error_count}");
 }
+
+/// Parks an OB apply deeper in the runtime — inside `remove_account`, right before the trie
+/// iterator is taken — then freezes the parent memtrie via resharding. Earlier trie reads
+/// (DelayedReceiptQueue::load, etc.) succeed because the root is still live. On resume,
+/// `lock_for_iter` sees empty MemTries and fails.
+///
+/// Uses a two-step breakpoint: first `after_trie_for_apply` catches the OB coroutine early,
+/// then `before_remove_account_iter` catches it deeper after resume.
+#[test]
+#[cfg(feature = "test_features")]
+fn test_ob_remove_account_iter_panics_when_parent_memtrie_frozen() {
+    use crate::utils::setups::derive_new_epoch_config_from_boundary;
+    use near_chain_configs::test_genesis::TestGenesisBuilder;
+    use near_primitives::epoch_manager::EpochConfigStore;
+    use near_primitives::test_utils::create_user_test_signer;
+    use near_primitives::transaction::SignedTransaction;
+    use near_primitives::version::PROTOCOL_VERSION;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    init_test_logger();
+
+    let epoch_length: u64 = 10;
+    let num_accounts = 8;
+    let accounts: Vec<AccountId> =
+        (0..num_accounts).map(|i| format!("account{}", i).parse().unwrap()).collect();
+
+    let base_protocol_version = PROTOCOL_VERSION - 2;
+    let base_shard_layout = {
+        let boundary_accounts = vec!["account1".parse().unwrap(), "account3".parse().unwrap()];
+        let shard_ids = vec![ShardId::new(5), ShardId::new(3), ShardId::new(6)];
+        let shards_split_map = [(ShardId::new(0), shard_ids.clone())].into_iter().collect();
+        ShardLayout::v2(boundary_accounts, shard_ids, Some(shards_split_map))
+    };
+    let mut base_epoch_config = EpochConfigStore::for_chain_id("mainnet", None)
+        .unwrap()
+        .get_config(base_protocol_version)
+        .as_ref()
+        .clone();
+    base_epoch_config.num_block_producer_seats = 1;
+    base_epoch_config.num_chunk_producer_seats = 1;
+    base_epoch_config.num_chunk_validator_seats = 1;
+    let base_epoch_config = base_epoch_config.with_shard_layout(base_shard_layout.clone());
+
+    let new_boundary_account: AccountId = "account6".parse().unwrap();
+    let (new_epoch_config, _) =
+        derive_new_epoch_config_from_boundary(&base_epoch_config, &new_boundary_account);
+
+    let epoch_config_store = EpochConfigStore::test(BTreeMap::from([
+        (base_protocol_version, Arc::new(base_epoch_config)),
+        (base_protocol_version + 1, Arc::new(new_epoch_config)),
+    ]));
+
+    let builder = TestLoopBuilder::new();
+    let genesis = TestGenesisBuilder::new()
+        .genesis_time_from_clock(&builder.clock())
+        .shard_layout(base_shard_layout)
+        .protocol_version(base_protocol_version)
+        .epoch_length(epoch_length)
+        .validators_spec(ValidatorsSpec::desired_roles(&[accounts[0].as_str()], &[]))
+        .add_user_accounts_simple(&accounts, Balance::from_near(1_000_000))
+        .build();
+
+    let mut env = builder
+        .genesis(genesis)
+        .epoch_config_store(epoch_config_store)
+        .clients(vec![accounts[0].clone()])
+        .track_all_shards()
+        .enable_yield_points()
+        .config_modifier(|config, _| {
+            let mut resharding_config = config.resharding_config.get();
+            resharding_config.batch_delay = Duration::milliseconds(1);
+            config.resharding_config.update(resharding_config);
+        })
+        .build();
+
+    let client_handle = env.node_datas[0].client_sender.actor_handle();
+
+    // Advance to height 18, then submit delete_account for account4 (shard 6).
+    // The tx lands in a chunk around height 19-20, so the OB at the resharding boundary
+    // (height 21) will include the delete_account local receipt.
+    env.test_loop.run_until(
+        |data| data.get(&client_handle).client.chain.head().unwrap().height >= 18,
+        Duration::seconds(15),
+    );
+
+    let victim: AccountId = "account4".parse().unwrap();
+    let signer = create_user_test_signer(&victim);
+    let head = env.test_loop.data.get(&client_handle).client.chain.head().unwrap();
+    let delete_tx = SignedTransaction::delete_account(
+        1,
+        victim.clone(),
+        victim.clone(),
+        accounts[0].clone(),
+        &signer.into(),
+        head.last_block_hash,
+    );
+    env.node(0).submit_tx(delete_tx);
+
+    // Step 1: Arm early breakpoint for OB shard 6 applies. The OB fires before the canonical
+    // block, so the first hit is the OB containing our delete_account.
+    let bp1 = env
+        .test_loop
+        .breakpoint("after_trie_for_apply")
+        .when(|ctx| ctx.get("block_type") == Some("Optimistic") && ctx.get("shard_id") == Some("6"))
+        .arm();
+
+    // Advance until the OB containing the delete_account hits the breakpoint.
+    env.test_loop.run_until(|_| bp1.hit_count() >= 1, Duration::seconds(15));
+    let early_hit = bp1.take_hit().unwrap();
+    drop(bp1);
+
+    // Step 2: Arm the deeper breakpoint inside remove_account, then resume. The coroutine
+    // continues past initial trie reads (root still alive) and parks at the iterator.
+    let bp2 = env
+        .test_loop
+        .breakpoint("before_remove_account_iter")
+        .when(move |ctx| ctx.get("account_id") == Some("account4"))
+        .arm();
+
+    early_hit.resume();
+    env.test_loop.run_until(|_| bp2.hit_count() >= 1, Duration::seconds(10));
+    let iter_hit = bp2.take_hit().unwrap();
+    drop(bp2);
+
+    // Step 3: Advance the canonical chain through resharding. Freeze replaces MemTries.
+    env.test_loop.run_until(
+        |data| data.get(&client_handle).client.chain.head().unwrap().height >= 30,
+        Duration::seconds(30),
+    );
+
+    let client = &env.test_loop.data.get(&client_handle).client;
+    let tip = client.chain.head().unwrap();
+    let shard_layout = client.epoch_manager.get_shard_layout(&tip.epoch_id).unwrap();
+    assert_eq!(shard_layout.num_shards(), 4, "expected 4 shards after resharding");
+
+    // Resume the parked OB apply. The iterator tries to look up the root in the now-empty
+    // MemTries and panics (unwrap at iter.rs). pending_shard_jobs catches the panic via
+    // catch_unwind, so we detect it through the panic hook.
+    let panic_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = panic_count.clone();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |_| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    iter_hit.resume();
+    env.test_loop.run_for(Duration::seconds(1));
+
+    std::panic::set_hook(prev_hook);
+    let panics = panic_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(panics >= 1, "expected at least 1 panic from memtrie root lookup, got {panics}");
+}

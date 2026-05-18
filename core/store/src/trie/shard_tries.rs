@@ -666,22 +666,27 @@ impl ShardTries {
             "freezing parent memtrie, creating children memtries",
         );
         let mut outer_guard = self.0.memtries.write();
-        let Some(memtries) = outer_guard.remove(&parent_shard_uid) else {
+        let Some(parent_arc) = outer_guard.remove(&parent_shard_uid) else {
             return Err(StorageError::MemTrieLoadingError(format!(
                 "On freezing parent memtrie, memtrie not loaded for shard {:?}",
                 parent_shard_uid
             )));
         };
-        let mut guard = memtries.write();
-        let memtries = std::mem::replace(&mut *guard, MemTries::new(parent_shard_uid));
-        let frozen_memtries = memtries.freeze();
+        let mut guard = parent_arc.write();
+        let old_memtries = std::mem::replace(&mut *guard, MemTries::new(parent_shard_uid));
+        let frozen_memtries = old_memtries.freeze();
+        // Replace the placeholder with frozen data so that in-flight applies
+        // holding clones of parent_arc can still resolve their state roots.
+        *guard = MemTries::from_frozen_memtries(parent_shard_uid, frozen_memtries.clone());
+        drop(guard);
 
-        // Create hybrid memtrie for both parent and children shards.
-        for shard_uid in [vec![parent_shard_uid], children_shard_uids.clone()].concat() {
+        // Re-insert the original parent Arc and create new Arcs for children.
+        outer_guard.insert(parent_shard_uid, parent_arc);
+        for &child_uid in &children_shard_uids {
             outer_guard.insert(
-                shard_uid,
+                child_uid,
                 Arc::new(RwLock::new(MemTries::from_frozen_memtries(
-                    shard_uid,
+                    child_uid,
                     frozen_memtries.clone(),
                 ))),
             );

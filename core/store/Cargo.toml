@@ -92,7 +92,7 @@ harness = false
 default = []
 io_trace = []
 single_thread_rocksdb = [] # Deactivate RocksDB IO background threads
-test_features = ["near-vm-runner/test_features"]
+test_features = ["near-vm-runner/test_features", "near-async/test_features"]
 
 # TODO(#11639): extract metrics into separate feature
 nightly = [
