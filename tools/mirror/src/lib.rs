@@ -2049,6 +2049,7 @@ impl<T: ChainAccess> TxMirror<T> {
         accounts_to_unstake: mpsc::Sender<HashMap<(AccountId, PublicKey), AccountId>>,
         target_height: Arc<RwLock<BlockHeight>>,
         target_head: Arc<RwLock<CryptoHash>>,
+        confirm_timeout: Duration,
     ) -> anyhow::Result<()> {
         let indexer_config = near_indexer::IndexerConfig {
             home_dir,
@@ -2107,6 +2108,15 @@ impl<T: ChainAccess> TxMirror<T> {
                 let nonce = crate::fetch_nonce(&view_client, &nonce_key).await?;
                 let mut tracker = tracker.lock();
                 tracker.resolve_awaiting_nonce(&tx_block_queue, db.as_ref(), &nonce_key, nonce)?;
+            }
+
+            // Confirm submitted txs landed by querying the target's nonce (restart-safe), and
+            // drop them from the unconfirmed set so finished() can complete.
+            let to_confirm = { tracker.lock().unconfirmed_keys() };
+            for (nonce_key, submitted) in to_confirm {
+                let live = crate::fetch_nonce(&view_client, &nonce_key).await?;
+                let now = std::time::Instant::now();
+                tracker.lock().confirm_submitted(&nonce_key, submitted, live, now, confirm_timeout);
             }
         }
     }
@@ -2304,6 +2314,7 @@ impl<T: ChainAccess> TxMirror<T> {
         let tx_block_queue = Arc::new(Mutex::new(VecDeque::new()));
 
         let tx_block_queue2 = tx_block_queue.clone();
+        let confirm_timeout = self.target_min_block_production_delay * 10;
         let _index_target_task = tokio::task::spawn(async move {
             let res = Self::index_target_loop(
                 tracker2,
@@ -2314,6 +2325,7 @@ impl<T: ChainAccess> TxMirror<T> {
                 unstake_tx,
                 target_height2,
                 target_head2,
+                confirm_timeout,
             )
             .await;
             if let Err(res) = target_indexer_done_tx.send(res) {

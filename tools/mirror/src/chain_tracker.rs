@@ -137,13 +137,13 @@ pub(crate) struct TxTracker {
     nonces: HashMap<NonceLookupKey, NonceInfo>,
     next_heights: VecDeque<BlockHeight>,
     height_queued: Option<BlockHeight>,
-    // the reason we have these (nonempty_height_queued, height_seen, etc) is so that we can
-    // exit after we receive the target block containing the txs we sent for the last source block.
-    // It's a minor thing, but otherwise if we just exit after sending the last source block's txs,
-    // we won't get to see the resulting txs on chain in the debug logs from log_target_block()
-    nonempty_height_queued: Option<BlockHeight>,
     height_popped: Option<BlockHeight>,
-    height_seen: Option<BlockHeight>,
+    // Txs we've submitted but not yet confirmed applied on the target: access key -> (highest
+    // nonce we submitted for it, when we first submitted). We finish once we've popped through
+    // --stop-height and this is empty. Confirmation is by querying the target's nonce, which is
+    // restart-safe (re-sent duplicates confirm immediately since the chain is already past them),
+    // unlike observing our own txs in the stream.
+    unconfirmed: HashMap<NonceLookupKey, (Nonce, Instant)>,
     // Config value in the target chain, used to judge how long to wait before sending a new batch of txs
     min_block_production_delay: Duration,
     // optional specific tx send delay
@@ -178,9 +178,8 @@ impl TxTracker {
             updater_to_keys: HashMap::new(),
             nonces: HashMap::new(),
             height_queued: None,
-            nonempty_height_queued: None,
             height_popped: None,
-            height_seen: None,
+            unconfirmed: HashMap::new(),
             recent_block_timestamps: VecDeque::new(),
         }
     }
@@ -216,13 +215,39 @@ impl TxTracker {
 
     pub(crate) fn finished(&self) -> bool {
         match self.stop_height {
-            // Done once we've popped (sent or dropped) every block up to --stop-height. We
-            // deliberately don't also wait for height_seen to reach the last queued height:
-            // that is only a logging nicety, and after a restart the last blocks' txs were
-            // already applied and observed before the restart, so the forward-resuming indexer
-            // never re-streams them and height_seen could never catch up — which would hang us.
-            Some(stop_height) => self.height_popped >= Some(stop_height),
+            // Done once we've popped every block up to --stop-height and confirmed (by target
+            // query) that every tx we submitted has been applied.
+            Some(stop_height) => {
+                self.height_popped >= Some(stop_height) && self.unconfirmed.is_empty()
+            }
             None => false,
+        }
+    }
+
+    // Keys with a submitted-but-unconfirmed tx, paired with the highest nonce we submitted for it.
+    pub(crate) fn unconfirmed_keys(&self) -> Vec<(NonceLookupKey, Nonce)> {
+        self.unconfirmed.iter().map(|(key, (nonce, _))| (key.clone(), *nonce)).collect()
+    }
+
+    // Given the target's live nonce for `key`, drop it from the unconfirmed set once the target
+    // has caught up to the nonce we submitted (the tx was applied, even if it failed execution),
+    // or after `timeout` if it never does (e.g. the tx was rejected and never landed).
+    pub(crate) fn confirm_submitted(
+        &mut self,
+        key: &NonceLookupKey,
+        submitted: Nonce,
+        live: Option<Nonce>,
+        now: Instant,
+        timeout: Duration,
+    ) {
+        let Some((_, since)) = self.unconfirmed.get(key) else {
+            return;
+        };
+        if live >= Some(submitted) {
+            self.unconfirmed.remove(key);
+        } else if now.duration_since(*since) > timeout {
+            tracing::warn!(target: "mirror", ?key, submitted, ?live, "submitted tx not confirmed on target after timeout; giving up");
+            self.unconfirmed.remove(key);
         }
     }
 
@@ -455,9 +480,6 @@ impl TxTracker {
         self.next_heights.pop_front().unwrap();
 
         for c in &block.chunks {
-            if !c.txs.is_empty() {
-                self.nonempty_height_queued = Some(block.source_height);
-            }
             for (tx_idx, tx) in c.txs.iter().enumerate() {
                 let tx_ref =
                     TxRef { source_height: block.source_height, shard_id: c.shard_id, tx_idx };
@@ -824,12 +846,9 @@ impl TxTracker {
         db: &DB,
         tx: IndexerTransactionWithOutcome,
     ) -> anyhow::Result<()> {
-        if let Some(info) = self.sent_txs.remove(&tx.transaction.hash) {
+        if self.sent_txs.remove(&tx.transaction.hash).is_some() {
             crate::metrics::TRANSACTIONS_INCLUDED.inc();
             self.remove_tx(&tx);
-            if info.source_height > self.height_seen {
-                self.height_seen = info.source_height;
-            }
         }
         if let Some(nonce_keys) = crate::read_pending_outcome(db, &tx.transaction.hash)? {
             match tx.outcome.execution_outcome.outcome.status {
@@ -968,6 +987,15 @@ impl TxTracker {
         // TODO: don't keep adding txs if we're not ever finding them on chain, since we'll OOM eventually
         // if that happens.
         self.sent_txs.insert(hash, TxSendInfo::new(&tx, source_height, target_height, now));
+        // Track for the finish check: we won't declare done until the target's nonce confirms
+        // this submission applied. Only meaningful for source-replay txs (tx_ref is Some).
+        if tx_ref.is_some() {
+            let submitted_nonce = tx.target_tx.transaction.nonce().nonce();
+            self.unconfirmed
+                .entry(nonce_key.clone())
+                .and_modify(|(m, _)| *m = (*m).max(submitted_nonce))
+                .or_insert((submitted_nonce, now));
+        }
         let txs = self.txs_by_signer.entry(nonce_key.clone()).or_default();
 
         if let Some(highest_nonce) = txs.iter().next_back() {
