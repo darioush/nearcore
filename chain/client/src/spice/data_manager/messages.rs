@@ -16,8 +16,10 @@ pub(crate) enum WantUnits {
 /// Who is asking — determines authorization and QoS lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Requester {
+    /// Entitled recipient; served on the `Priority` lane.
     Validator(AccountId),
     /// RPC / state-sync: response routes back over the requesting connection only.
+    /// Served on the `Background` lane.
     NonValidator,
 }
 
@@ -54,13 +56,15 @@ pub(crate) enum ResponsePayload {
     NotAvailable,
 }
 
-/// Consumer → manager: validation succeeded, artifact persisted.
+/// Consumer → manager: validation succeeded, artifact persisted. Manager releases
+/// budgets and shrinks the item to its attribution husk, retained until expiry.
 #[derive(Debug)]
 pub(crate) struct VerifiedEvent {
     pub(crate) data_id: DataId,
 }
 
 /// Consumer → manager: validation failed; funnels `kind` into reputation.
+/// Also carries retroactive `CertifiedResultMismatch` reports.
 #[derive(Debug)]
 pub(crate) struct FailedEvent {
     pub(crate) data_id: DataId,

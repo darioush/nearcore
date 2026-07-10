@@ -30,14 +30,21 @@ pub(crate) enum AdmitError {
 /// `Priority` unit hitting one is a liveness bug.
 #[derive(Debug, Clone)]
 pub(crate) struct Budgets {
+    /// Global `Priority` lane cap.
     pub(crate) global_priority_bytes: u64,
+    /// Global `Background` lane cap.
     pub(crate) global_background_bytes: u64,
+    /// Per-block cap.
     pub(crate) per_block_bytes: u64,
+    /// Total orphan-pool cap.
     pub(crate) orphan_bytes: u64,
+    /// Per-sender orphan cap.
     pub(crate) per_sender_orphan_bytes: u64,
+    /// How far above the head speculative/orphan data is accepted.
     pub(crate) speculative_allowance: BlockHeight,
 }
 
+/// Per-type maximum declared/encoded sizes, checked before allocating.
 #[derive(Debug, Clone)]
 pub(crate) struct SizeCaps {
     pub(crate) max_witness_encoded_len: u64,

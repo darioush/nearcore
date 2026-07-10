@@ -12,19 +12,12 @@ use std::collections::HashMap;
 /// Unified content id across all fetchable data types; versioned on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum DataId {
-    Witness {
-        block_hash: CryptoHash,
-        shard_id: ShardId,
-    },
-    ReceiptProof {
-        block_hash: CryptoHash,
-        from_shard_id: ShardId,
-        to_shard_id: ShardId,
-    },
-    /// Content-addressed; its interested context lives on [`FetchItem::anchor`].
-    ContractCode {
-        code_hash: CodeHash,
-    },
+    /// Erasure-coded; produced by `shard`'s chunk producers, needed by its validators.
+    Witness { block_hash: CryptoHash, shard_id: ShardId },
+    /// Erasure-coded; produced by `from` shard, needed by next-block producers of `to`.
+    ReceiptProof { block_hash: CryptoHash, from_shard_id: ShardId, to_shard_id: ShardId },
+    /// Content-addressed by `code_hash`; the same code across blocks/shards is one fetch, its context on [`FetchItem::anchor`].
+    ContractCode { code_hash: CodeHash },
 }
 
 impl DataId {
@@ -57,21 +50,27 @@ pub(crate) enum TransferUnit {
 
 /// State of one tracked piece of data; the variant's origin is fixed for its lifetime.
 pub(crate) enum Item {
+    /// Produced by others; we fetch it.
     Fetch(FetchItem),
+    /// Produced by us; we serve it.
     Produce(ProduceState),
 }
 
 /// Data we author. Holds no bytes: the artifact lives in the store, re-served from the
 /// manager's byte-budgeted `EncodeCache`.
 pub(crate) enum ProduceState {
+    /// Assigned to produce it; execution not finished yet.
     Producing,
+    /// Artifact in store; serve any requested units.
     Produced,
 }
 
 /// The consume-side lifecycle. No `Have` variant; removal is only via head-driven expiry.
 #[derive(Debug)]
 pub(crate) enum FetchState {
+    /// Wanted, seeded from chain; no unit has arrived yet.
     Need,
+    /// At least one unit obtained or the existence gate opened; accumulating toward completion.
     Collecting(Assembly),
     /// Bytes handed to the consumer; awaiting its `Verified`/`Failed`. Keeps a re-pushed part from re-entering `Collecting`.
     Delivered,
@@ -88,19 +87,23 @@ pub(crate) struct FetchItem {
     pub(crate) height: BlockHeight,
     /// Contract code only: highest-block (block, shard) wanting this hash; shard names the source pool, block resolves the epoch.
     pub(crate) anchor: Option<(CryptoHash, ShardId)>,
+    /// Who sent which unit; retained until expiry so late faults still map back to senders.
     pub(crate) attribution: DataAttribution,
     /// Pull requests on the wire now; suppresses duplicate requests, freed for re-request past `request_timeout`.
     pub(crate) in_flight: Vec<InFlightRequest>,
+    /// Retry/backoff bookkeeping (the scheduler owns only deadlines).
     pub(crate) backoff: Backoff,
     /// Arrival of the first unit; starts the `first_unit_pull_delay` clock.
     pub(crate) first_unit_at: Option<Instant>,
+    /// Currently armed deadline; `drain_due` discards stale heap entries against it.
     pub(crate) next_deadline: Option<Instant>,
 }
 
+/// One outstanding pull request to one peer.
 pub(crate) struct InFlightRequest {
     pub(crate) who: AccountId,
     pub(crate) sent_at: Instant,
-    /// Empty ⇒ the whole blob.
+    /// Requested ordinals; empty ⇒ the whole blob.
     pub(crate) ordinals: Vec<u32>,
 }
 
@@ -115,6 +118,7 @@ pub(crate) enum Assembly {
 
 pub(crate) struct CodedTracker {
     // tracker: ReedSolomonPartsTracker<SpiceData>, concrete-by-name so no generic climbs up to `Item` and breaks the one-map premise.
+    /// Ordinals held — a cheap bitset so `missing_ordinals` never touches part buffers.
     pub(crate) have_ordinals: Vec<bool>,
 }
 
@@ -133,7 +137,9 @@ impl Assembly {
 /// Which sender contributed which unit, per commitment, so a fault can be pinned.
 #[derive(Default)]
 pub(crate) struct DataAttribution {
+    /// commitment → (ordinal → sender); bad bytes blame the sender, a garbage decode blames the commitment's vouchers.
     pub(crate) coded: HashMap<SpiceDataCommitment, HashMap<u32, AccountId>>,
+    /// The blob responder.
     pub(crate) blob_sender: Option<AccountId>,
 }
 

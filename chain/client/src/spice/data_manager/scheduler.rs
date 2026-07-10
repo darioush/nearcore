@@ -8,15 +8,23 @@ use std::collections::BinaryHeap;
 /// Timing tuning knobs. Reputation decay lives in [`super::reputation::ReputationConfig`].
 #[derive(Debug, Clone)]
 pub(crate) struct TimingConfig {
-    pub(crate) push_grace: Duration,            // ≈200 ms
-    pub(crate) first_unit_pull_delay: Duration, // ≈200 ms
-    pub(crate) request_timeout: Duration,       // ≈1 s
-    pub(crate) backoff_base: Duration,          // ≈ T_rtt
-    pub(crate) backoff_multiplier: u32,         // 2
-    pub(crate) backoff_cap: Duration,           // ≈2 s
-    pub(crate) jitter_frac: f64,                // ± fraction; rng injected for determinism
-    pub(crate) escalation_fanout: u8,           // producers contacted on decode-timeout, 2–3
-    pub(crate) safety_sweep: Duration,          // ≈5 s
+    /// Grace for straggler pushes before pulling a due unit. ≈200 ms.
+    pub(crate) push_grace: Duration,
+    /// After the first unit arrives, wait before pulling missing ordinals. ≈200 ms.
+    pub(crate) first_unit_pull_delay: Duration,
+    /// Unanswered `in_flight` request lifetime before `note_timeout` + removal. ≈1 s.
+    pub(crate) request_timeout: Duration,
+    /// Retry backoff base. ≈ T_rtt.
+    pub(crate) backoff_base: Duration,
+    /// Geometric backoff multiplier. 2.
+    pub(crate) backoff_multiplier: u32,
+    /// Retry backoff cap. ≈2 s.
+    pub(crate) backoff_cap: Duration,
+    pub(crate) jitter_frac: f64, // ± fraction; rng injected for determinism
+    /// Producers contacted on decode-timeout, each asked for the full missing set. 2–3.
+    pub(crate) escalation_fanout: u8,
+    /// Coarse backstop sweep for anything the event path missed. ≈5 s.
+    pub(crate) safety_sweep: Duration,
 }
 
 impl Default for TimingConfig {

@@ -4,6 +4,8 @@ use super::item::DataId;
 use std::collections::HashMap;
 
 /// Byte-budgeted LRU cache of encoded parts, so pull storms never re-encode.
+/// Populated for free at production time. A sibling of the item map, not state
+/// within it: the byte bound is global and cache lifetime ≠ item lifetime.
 pub(crate) struct EncodeCache {
     budget_bytes: u64,
     used_bytes: u64,
@@ -24,5 +26,6 @@ impl EncodeCache {
         None // sketch
     }
 
+    /// Drop entries for expired items eagerly, on expiry.
     pub(crate) fn evict(&mut self, _id: &DataId) {}
 }
