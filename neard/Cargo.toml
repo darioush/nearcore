@@ -44,6 +44,7 @@ near-jsonrpc-primitives.workspace = true
 near-mirror.workspace = true
 near-network.workspace = true
 near-o11y.workspace = true
+near-epoch-sync-proof-size.workspace = true
 near-ping.workspace = true
 near-primitives.workspace = true
 near-replay-archive-tool.workspace = true
@@ -88,6 +89,7 @@ nightly = [
   "near-mirror/nightly",
   "near-network/nightly",
   "near-o11y/nightly",
+  "near-epoch-sync-proof-size/nightly",
   "near-ping/nightly",
   "near-primitives/nightly",
   "near-state-parts/nightly",

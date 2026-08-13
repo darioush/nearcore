@@ -71,6 +71,7 @@ members = [
     "test-utils/testlib",
     "tools/cloud-archive",
     "tools/database",
+    "tools/epoch-sync-proof-size",
     "tools/congestion-model",
     "tools/fork-network",
     "tools/indexer/example",
@@ -234,6 +235,7 @@ near-crypto = { path = "core/crypto", default-features = false }
 near-dyn-configs = { path = "core/dyn-configs" }
 near-epoch-manager = { path = "chain/epoch-manager" }
 near-external-storage = { path = "core/external-storage" }
+near-epoch-sync-proof-size = { path = "tools/epoch-sync-proof-size" }
 near-flat-storage = { path = "tools/flat-storage" }
 near-fork-network = { path = "tools/fork-network" }
 near-fmt = { path = "utils/fmt" }

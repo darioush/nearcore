@@ -9,6 +9,7 @@ use near_cold_store_tool::ColdStoreCommand;
 use near_config_utils::DownloadConfigType;
 use near_database_tool::commands::DatabaseCommand;
 use near_dyn_configs::{UpdatableConfigLoader, UpdatableConfigLoaderError, UpdatableConfigs};
+use near_epoch_sync_proof_size::cli::EpochSyncProofSizeCommand;
 use near_flat_storage::commands::FlatStorageCommand;
 use near_fork_network::cli::ForkNetworkCommand;
 use near_jsonrpc_primitives::types::light_client::RpcLightClientExecutionProofResponse;
@@ -125,6 +126,9 @@ impl NeardCmd {
                 cmd.run();
             }
             NeardSubCommand::Ping(cmd) => {
+                cmd.run()?;
+            }
+            NeardSubCommand::EpochSyncProofSize(cmd) => {
                 cmd.run()?;
             }
             NeardSubCommand::Mirror(cmd) => {
@@ -245,6 +249,11 @@ pub(super) enum NeardSubCommand {
     /// Connects to a NEAR node and sends ping messages to the accounts it sends
     /// us after the handshake is completed, printing stats to stdout.
     Ping(PingCommand),
+
+    /// Requests an epoch sync proof from a peer and reports the response size
+    /// and how much it grows per epoch.
+    #[clap(name = "epoch-sync-proof-size")]
+    EpochSyncProofSize(EpochSyncProofSizeCommand),
 
     /// Mirror transactions from a source chain to a test chain with state forked
     /// from it, reproducing traffic and state as closely as possible.

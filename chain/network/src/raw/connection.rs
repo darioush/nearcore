@@ -13,10 +13,12 @@ use bytes::buf::{Buf, BufMut};
 use near_async::time::{Clock, Duration, Instant, Utc};
 use near_crypto::{KeyType, SecretKey};
 use near_primitives::block::{Block, BlockHeader};
+use near_primitives::epoch_sync::CompressedEpochSyncProof;
 use near_primitives::genesis::GenesisId;
 use near_primitives::hash::CryptoHash;
 use near_primitives::network::{AnnounceAccount, PeerId};
 use near_primitives::types::{BlockHeight, ShardId};
+use near_primitives::utils::compression::CompressedData;
 use near_primitives::version::{PROTOCOL_VERSION, ProtocolVersion};
 use std::fmt;
 use std::io;
@@ -87,6 +89,8 @@ pub enum DirectMessage {
     StateRequestHeader(ShardId, CryptoHash),
     StateRequestPart(ShardId, CryptoHash, u64),
     VersionedStateResponse(Box<StateResponseInfo>),
+    EpochSyncRequest,
+    EpochSyncResponse(CompressedEpochSyncProof),
 }
 
 impl fmt::Display for DirectMessage {
@@ -121,6 +125,10 @@ impl fmt::Debug for DirectMessage {
                 r.shard_id(),
                 r.sync_hash()
             ),
+            Self::EpochSyncRequest => write!(f, "EpochSyncRequest"),
+            Self::EpochSyncResponse(proof) => {
+                write!(f, "EpochSyncResponse(compressed_len: {})", proof.size_bytes())
+            }
         }
     }
 }
@@ -396,6 +404,8 @@ impl Connection {
             DirectMessage::VersionedStateResponse(request) => {
                 PeerMessage::VersionedStateResponse(*request)
             }
+            DirectMessage::EpochSyncRequest => PeerMessage::EpochSyncRequest,
+            DirectMessage::EpochSyncResponse(proof) => PeerMessage::EpochSyncResponse(proof),
         };
 
         self.stream.write_message(&peer_msg).await
@@ -515,6 +525,15 @@ impl Connection {
                         Message::Direct(DirectMessage::VersionedStateResponse(Box::new(
                             state_response,
                         ))),
+                        timestamp,
+                    ));
+                }
+                PeerMessage::EpochSyncRequest => {
+                    return Ok((Message::Direct(DirectMessage::EpochSyncRequest), timestamp));
+                }
+                PeerMessage::EpochSyncResponse(proof) => {
+                    return Ok((
+                        Message::Direct(DirectMessage::EpochSyncResponse(proof)),
                         timestamp,
                     ));
                 }

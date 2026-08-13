@@ -4256,6 +4256,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-epoch-sync-proof-size"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "bytesize 1.1.0",
+ "clap",
+ "near-network",
+ "near-o11y",
+ "near-ping",
+ "near-primitives",
+ "near-time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "near-external-storage"
 version = "0.0.0"
 dependencies = [
@@ -5178,6 +5195,7 @@ dependencies = [
  "near-database-tool",
  "near-dump-test-contract",
  "near-dyn-configs",
+ "near-epoch-sync-proof-size",
  "near-flat-storage",
  "near-fork-network",
  "near-jsonrpc-primitives",
