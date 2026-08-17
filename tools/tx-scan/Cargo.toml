@@ -1,0 +1,46 @@
+[package]
+name = "near-tx-scan-tool"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "tx-scan"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+rayon.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+borsh.workspace = true
+
+near-chain-configs.workspace = true
+near-chain-primitives.workspace = true
+near-epoch-manager.workspace = true
+near-primitives.workspace = true
+near-primitives-core.workspace = true
+near-store.workspace = true
+nearcore.workspace = true
+
+[features]
+nightly = [
+    "near-chain-configs/nightly",
+    "near-epoch-manager/nightly",
+    "near-primitives-core/nightly",
+    "near-primitives/nightly",
+    "near-store/nightly",
+    "nearcore/nightly",
+]

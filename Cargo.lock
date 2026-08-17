@@ -5037,6 +5037,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-tx-scan-tool"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "clap",
+ "indicatif",
+ "near-chain-configs",
+ "near-chain-primitives",
+ "near-epoch-manager",
+ "near-primitives",
+ "near-primitives-core",
+ "near-store",
+ "nearcore",
+ "rayon",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "near-undo-block"
 version = "0.0.0"
 dependencies = [
