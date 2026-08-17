@@ -10,6 +10,9 @@ pub struct ProgressReporter {
     unit: &'static str,
     total: u64,
     position: u64,
+    /// Position this run resumed from. Rate and estimate count only the work
+    /// done since then, so a resumed prefix is not treated as instant.
+    start_position: u64,
     started: Instant,
     last_line: Instant,
     interval: Duration,
@@ -29,7 +32,17 @@ impl ProgressReporter {
             bar.set_style(ProgressStyle::with_template(&template)?.progress_chars("=> "));
         }
         let now = Instant::now();
-        Ok(Self { bar, unit, total, position: 0, started: now, last_line: now, interval, plain })
+        Ok(Self {
+            bar,
+            unit,
+            total,
+            position: 0,
+            start_position: 0,
+            started: now,
+            last_line: now,
+            interval,
+            plain,
+        })
     }
 
     pub fn set_position(&mut self, position: u64) {
@@ -46,7 +59,10 @@ impl ProgressReporter {
     /// actually did rather than counting a resumed prefix as instant.
     pub fn start_at(&mut self, position: u64) {
         self.position = position;
+        self.start_position = position;
         self.bar.set_position(position);
+        self.bar.reset_eta();
+        self.bar.reset_elapsed();
         self.started = Instant::now();
         if self.plain && position > 0 {
             eprintln!("resuming at {position}/{} {}", self.total, self.unit);
@@ -62,14 +78,16 @@ impl ProgressReporter {
         }
         self.last_line = Instant::now();
         let elapsed = self.started.elapsed().as_secs_f64();
-        let done = self.position;
-        let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
-        let percent = if self.total > 0 { done as f64 * 100.0 / self.total as f64 } else { 0.0 };
-        let remaining = self.total.saturating_sub(done);
+        let done_this_run = self.position.saturating_sub(self.start_position);
+        let rate = if elapsed > 0.0 { done_this_run as f64 / elapsed } else { 0.0 };
+        let percent =
+            if self.total > 0 { self.position as f64 * 100.0 / self.total as f64 } else { 0.0 };
+        let remaining = self.total.saturating_sub(self.position);
         let eta = if rate > 0.0 { format_duration(remaining as f64 / rate) } else { "?".into() };
         eprintln!(
-            "{} {done}/{} ({percent:.2}%) {rate:.0}/s elapsed {} eta {eta}",
+            "{} {}/{} ({percent:.2}%) {done_this_run} this run at {rate:.1}/s elapsed {} eta {eta}",
             self.unit,
+            self.position,
             self.total,
             format_duration(elapsed)
         );
@@ -79,10 +97,11 @@ impl ProgressReporter {
         self.report_line(true);
         if self.plain {
             eprintln!(
-                "{} finished: {}/{} in {}",
+                "{} finished: {}/{}, {} this run in {}",
                 self.unit,
                 self.position,
                 self.total,
+                self.position.saturating_sub(self.start_position),
                 format_duration(self.started.elapsed().as_secs_f64())
             );
         } else {
