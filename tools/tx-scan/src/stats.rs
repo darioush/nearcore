@@ -99,6 +99,16 @@ pub struct AccountConcurrency {
     /// Entry `d` is the most transactions this account had in one chunk plus
     /// the `d` produced chunks before it.
     pub max_in_flight: Vec<u32>,
+    /// Entry `d` holds how often each in-flight count occurred at that
+    /// distance: bucket `i` counts this account's transactions that had `i + 1`
+    /// in flight. The peak alone cannot say whether the account sits near it or
+    /// touched it once.
+    pub in_flight_histogram: Vec<Vec<u64>>,
+    /// This account's measured transactions, counted from the first one that
+    /// had company. Earlier solo transactions are not counted, which only
+    /// distorts accounts that ran alone for a long time before their first
+    /// burst.
+    pub transactions_counted: u64,
     /// First and last block height at which this account had two or more
     /// transactions in flight. A contract deploy cannot be undone, so checking
     /// both ends settles the whole span: if neither has a contract, none of it
@@ -280,22 +290,32 @@ impl ScanState {
                 let bucket = (in_flight as usize).min(IN_FLIGHT_BUCKETS) - 1;
                 stats.in_flight_histogram[bucket] += 1;
             }
-            if !transaction.in_flight_within.iter().any(|&count| count >= 2) {
+            let had_company = transaction.in_flight_within.iter().any(|&count| count >= 2);
+            // Once an account is tracked, its later solo transactions count
+            // too, so the histogram shows how often it runs alone.
+            if !had_company && !self.concurrent_accounts.contains_key(&transaction.signer_id) {
                 continue;
             }
             let record =
                 self.concurrent_accounts.entry(transaction.signer_id).or_insert_with(|| {
                     AccountConcurrency {
                         max_in_flight: vec![0; DISTANCE_COUNT],
+                        in_flight_histogram: vec![vec![0; IN_FLIGHT_BUCKETS]; DISTANCE_COUNT],
+                        transactions_counted: 0,
                         first_height: height,
                         last_height: height,
                         shard_id,
                     }
                 });
-            record.last_height = height;
-            record.shard_id = shard_id;
+            record.transactions_counted += 1;
+            if had_company {
+                record.last_height = height;
+                record.shard_id = shard_id;
+            }
             for (distance, &count) in transaction.in_flight_within.iter().enumerate() {
                 record.max_in_flight[distance] = record.max_in_flight[distance].max(count);
+                let bucket = (count as usize).min(IN_FLIGHT_BUCKETS) - 1;
+                record.in_flight_histogram[distance][bucket] += 1;
             }
         }
     }
@@ -431,6 +451,29 @@ mod tests {
         assert_eq!(state.concurrent_accounts[&account("alice.near")].max_in_flight[3], 3);
         assert_eq!(state.concurrent_accounts[&account("bob.near")].max_in_flight[0], 1);
         assert_eq!(state.concurrent_accounts[&account("bob.near")].max_in_flight[1], 2);
+    }
+
+    #[test]
+    fn an_accounts_solo_transactions_count_once_it_is_tracked() {
+        // One burst of three in a chunk, then four solo chunks. The peak hides
+        // that the account runs alone most of the time; the histogram does not.
+        let mut chunks = vec![vec![
+            transaction("alice.near", None),
+            transaction("alice.near", None),
+            transaction("alice.near", None),
+        ]];
+        for _ in 0..4 {
+            chunks.push(vec![transaction("alice.near", None)]);
+        }
+        let state = scan_one_shard(chunks);
+        let alice = &state.concurrent_accounts[&account("alice.near")];
+        assert_eq!(alice.transactions_counted, 7);
+        assert_eq!(alice.max_in_flight[0], 3);
+        // At distance zero: three transactions saw three in flight, and the
+        // four later ones were alone.
+        assert_eq!(alice.in_flight_histogram[0][0], 4);
+        assert_eq!(alice.in_flight_histogram[0][2], 3);
+        assert_eq!(alice.in_flight_histogram[0].iter().sum::<u64>(), 7);
     }
 
     #[test]
