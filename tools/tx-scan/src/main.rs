@@ -1,5 +1,6 @@
 mod checkpoint;
 mod db;
+mod progress;
 mod report;
 mod rpc;
 mod source;
@@ -8,8 +9,8 @@ mod stats;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use db::StoreSource;
-use indicatif::{ProgressBar, ProgressStyle};
 use near_primitives::types::{AccountId, BlockHeight};
+use progress::ProgressReporter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rpc::RpcSource;
 use source::{AccountSource, BlockSource, HistoricalAccountSource};
@@ -43,6 +44,11 @@ struct WorkerArgs {
 
     #[arg(long, default_value_t = 15)]
     save_every_secs: u64,
+
+    /// How often to print a progress line when standard error is not a
+    /// terminal, as over ssh or into a log file.
+    #[arg(long, default_value_t = 30)]
+    progress_every_secs: u64,
 }
 
 impl WorkerArgs {
@@ -59,6 +65,10 @@ impl WorkerArgs {
 
     fn save_interval(&self) -> Duration {
         Duration::from_secs(self.save_every_secs)
+    }
+
+    fn progress_interval(&self) -> Duration {
+        Duration::from_secs(self.progress_every_secs)
     }
 }
 
@@ -253,9 +263,8 @@ fn scan_blocks(
     end_height: BlockHeight,
 ) -> anyhow::Result<()> {
     let total = end_height - args.start_height + 1;
-    let bar = ProgressBar::new(total);
-    bar.set_style(progress_style("blocks")?);
-    bar.set_position(state.next_height.saturating_sub(args.start_height));
+    let mut bar = ProgressReporter::new(total, "blocks", args.worker.progress_interval())?;
+    bar.start_at(state.next_height.saturating_sub(args.start_height));
 
     let batch_size = args.worker.batch_size() as u64;
     let save_interval = args.worker.save_interval();
@@ -279,7 +288,7 @@ fn scan_blocks(
             last_save = Instant::now();
         }
     }
-    bar.finish_and_clear();
+    bar.finish();
     Ok(())
 }
 
@@ -299,8 +308,8 @@ fn look_up_contracts(
     if pending.is_empty() {
         return Ok(());
     }
-    let bar = ProgressBar::new(pending.len() as u64);
-    bar.set_style(progress_style("accounts")?);
+    let mut bar =
+        ProgressReporter::new(pending.len() as u64, "accounts", worker.progress_interval())?;
     let save_interval = worker.save_interval();
     let mut last_save = Instant::now();
 
@@ -315,13 +324,13 @@ fn look_up_contracts(
             let status = status.with_context(|| format!("looking up {account_id}"))?;
             state.contract_status.insert(account_id.clone(), status);
         }
-        bar.inc(batch.len() as u64);
+        bar.advance(batch.len() as u64);
         if last_save.elapsed() >= save_interval {
             checkpoint::save(checkpoint_path, state)?;
             last_save = Instant::now();
         }
     }
-    bar.finish_and_clear();
+    bar.finish();
     Ok(())
 }
 
@@ -338,8 +347,8 @@ fn run_verify_contracts(args: VerifyContractsArgs) -> anyhow::Result<()> {
     }
 
     let pool = args.worker.pool()?;
-    let bar = ProgressBar::new(accounts.len() as u64);
-    bar.set_style(progress_style("accounts")?);
+    let mut bar =
+        ProgressReporter::new(accounts.len() as u64, "accounts", args.worker.progress_interval())?;
     let mut agreed = 0;
     let mut disagreements = Vec::new();
 
@@ -364,9 +373,9 @@ fn run_verify_contracts(args: VerifyContractsArgs) -> anyhow::Result<()> {
                 disagreements.push((account_id.clone(), from_store, from_rpc));
             }
         }
-        bar.inc(batch.len() as u64);
+        bar.advance(batch.len() as u64);
     }
-    bar.finish_and_clear();
+    bar.finish();
 
     println!("{agreed} of {} accounts agree between database and rpc", accounts.len());
     if disagreements.is_empty() {
@@ -394,8 +403,8 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
     }
 
     let pool = args.worker.pool()?;
-    let bar = ProgressBar::new(pending.len() as u64);
-    bar.set_style(progress_style("accounts")?);
+    let mut bar =
+        ProgressReporter::new(pending.len() as u64, "accounts", args.worker.progress_interval())?;
     let save_interval = args.worker.save_interval();
     let mut last_save = Instant::now();
 
@@ -426,20 +435,13 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
         for (account_id, status) in resolved {
             state.historical_contract_status.insert(account_id, status);
         }
-        bar.inc(batch.len() as u64);
+        bar.advance(batch.len() as u64);
         if last_save.elapsed() >= save_interval {
             checkpoint::save(&args.checkpoint, &state)?;
             last_save = Instant::now();
         }
     }
-    bar.finish_and_clear();
+    bar.finish();
     checkpoint::save(&args.checkpoint, &state)?;
     write_report(&state, &args.report)
-}
-
-fn progress_style(unit: &str) -> anyhow::Result<ProgressStyle> {
-    let template = format!(
-        "{{spinner}} [{{elapsed_precise}}] [{{bar:40}}] {{pos}}/{{len}} {unit} ({{per_sec}}, eta {{eta}})"
-    );
-    Ok(ProgressStyle::with_template(&template)?.progress_chars("=> "))
 }

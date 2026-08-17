@@ -110,6 +110,12 @@ impl BlockSource for RpcSource {
             if header.height_included != height {
                 continue;
             }
+            // An empty transaction list merkleizes to the default hash, so the
+            // header alone rules the chunk out and its body never gets fetched.
+            if header.tx_root == CryptoHash::default() {
+                chunks.push(ScannedChunk { shard_id: header.shard_id, transactions: vec![] });
+                continue;
+            }
             let params = serde_json::json!({"block_id": height, "shard_id": header.shard_id});
             let Some(chunk) = self.call::<ChunkTransactions>("chunk", params)? else {
                 continue;

@@ -8,6 +8,7 @@ use near_chain_configs::GenesisValidationMode;
 use near_chain_primitives::Error;
 use near_epoch_manager::{EpochManager, EpochManagerAdapter, EpochManagerHandle};
 use near_primitives::account::Account;
+use near_primitives::hash::CryptoHash;
 use near_primitives::shard_layout::{ShardLayout, ShardUId};
 use near_primitives::state::FlatStateValue;
 use near_primitives::trie_key::TrieKey;
@@ -208,6 +209,13 @@ impl BlockSource for StoreSource {
         let mut chunks = Vec::new();
         for header in block.chunks().iter_raw() {
             if header.height_included() != height {
+                continue;
+            }
+            // An empty transaction list merkleizes to the default hash, so the
+            // header alone rules the chunk out and its body never gets read.
+            // Most chunks are empty, so this removes most of the reads.
+            if header.tx_root() == &CryptoHash::default() {
+                chunks.push(ScannedChunk { shard_id: header.shard_id(), transactions: vec![] });
                 continue;
             }
             let chunk = self.chunk_store.get_chunk(&header.chunk_hash()).with_context(|| {
