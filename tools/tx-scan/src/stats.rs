@@ -13,8 +13,31 @@ pub const DISTANCE_COUNT: usize = MAX_DISTANCE_CHUNKS + 1;
 /// A chunk is measured only once every chunk it looks back at is buffered.
 const BUFFER_CHUNKS: usize = DISTANCE_COUNT;
 
-/// In-flight counts at or above this land in the last histogram bucket.
-const IN_FLIGHT_BUCKETS: usize = 8;
+/// Upper bound of each in-flight bucket. Log scaled, because the accounts that
+/// matter run far above where a linear scale would saturate.
+const IN_FLIGHT_BUCKET_BOUNDS: [u32; 15] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192];
+
+/// One bucket per bound, plus a last one for everything above the top bound.
+const IN_FLIGHT_BUCKETS: usize = IN_FLIGHT_BUCKET_BOUNDS.len() + 1;
+
+fn in_flight_bucket(count: u32) -> usize {
+    IN_FLIGHT_BUCKET_BOUNDS
+        .iter()
+        .position(|&bound| count <= bound)
+        .unwrap_or(IN_FLIGHT_BUCKETS - 1)
+}
+
+/// Human readable range of each bucket, for the report header.
+pub fn in_flight_bucket_labels() -> Vec<String> {
+    let mut labels = Vec::with_capacity(IN_FLIGHT_BUCKETS);
+    let mut low = 1;
+    for bound in IN_FLIGHT_BUCKET_BOUNDS {
+        labels.push(if low == bound { low.to_string() } else { format!("{low}-{bound}") });
+        low = bound + 1;
+    }
+    labels.push(format!("{low}+"));
+    labels
+}
 
 /// Transaction hashes kept per `DelegateV2` sighting, so a non-zero count can
 /// be inspected on chain. Bounded so a busy chain cannot grow the checkpoint.
@@ -48,10 +71,9 @@ pub struct DistanceStats {
     /// Transactions that have another transaction of the same signer exactly
     /// this many produced chunks earlier on the same shard.
     pub transactions_with_earlier_match_at_distance: u64,
-    /// Bucket `i` counts transactions for which the signer had `i + 1`
-    /// transactions in this chunk and the previous `distance_chunks`; the last
-    /// bucket also absorbs everything larger. Every bucket above the first
-    /// holds a transaction that shares its window with another one.
+    /// Counts per in-flight bucket, see `in_flight_bucket_labels`. Every
+    /// bucket above the first holds a transaction that shares its window with
+    /// another one.
     pub in_flight_histogram: Vec<u64>,
 }
 
@@ -99,10 +121,9 @@ pub struct AccountConcurrency {
     /// Entry `d` is the most transactions this account had in one chunk plus
     /// the `d` produced chunks before it.
     pub max_in_flight: Vec<u32>,
-    /// Entry `d` holds how often each in-flight count occurred at that
-    /// distance: bucket `i` counts this account's transactions that had `i + 1`
-    /// in flight. The peak alone cannot say whether the account sits near it or
-    /// touched it once.
+    /// Entry `d` holds this account's transactions bucketed by how many it had
+    /// in flight at that distance, see `in_flight_bucket_labels`. The peak
+    /// alone cannot say whether the account sits near it or touched it once.
     pub in_flight_histogram: Vec<Vec<u64>>,
     /// This account's measured transactions, counted from the first one that
     /// had company. Earlier solo transactions are not counted, which only
@@ -287,8 +308,7 @@ impl ScanState {
                     stats.transactions_with_earlier_match_at_distance += 1;
                 }
                 let in_flight = transaction.in_flight_within[distance];
-                let bucket = (in_flight as usize).min(IN_FLIGHT_BUCKETS) - 1;
-                stats.in_flight_histogram[bucket] += 1;
+                stats.in_flight_histogram[in_flight_bucket(in_flight)] += 1;
             }
             let had_company = transaction.in_flight_within.iter().any(|&count| count >= 2);
             // Once an account is tracked, its later solo transactions count
@@ -314,8 +334,7 @@ impl ScanState {
             }
             for (distance, &count) in transaction.in_flight_within.iter().enumerate() {
                 record.max_in_flight[distance] = record.max_in_flight[distance].max(count);
-                let bucket = (count as usize).min(IN_FLIGHT_BUCKETS) - 1;
-                record.in_flight_histogram[distance][bucket] += 1;
+                record.in_flight_histogram[distance][in_flight_bucket(count)] += 1;
             }
         }
     }

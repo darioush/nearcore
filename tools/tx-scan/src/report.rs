@@ -1,5 +1,5 @@
 use crate::source::ContractStatus;
-use crate::stats::ScanState;
+use crate::stats::{ScanState, in_flight_bucket_labels};
 use near_primitives::types::BlockHeight;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -44,6 +44,8 @@ pub struct Report {
     pub action_counts: Vec<(String, u64)>,
     pub delegate_inner_action_counts: Vec<(String, u64)>,
     pub delegate_v2_count: u64,
+    /// Range each in-flight histogram bucket covers.
+    pub in_flight_bucket_labels: Vec<String>,
     pub distances: Vec<DistanceReport>,
 }
 
@@ -102,6 +104,7 @@ pub fn build(state: &ScanState) -> Report {
         action_counts: sorted_desc(&state.action_counts),
         delegate_inner_action_counts: sorted_desc(&state.delegate_inner_action_counts),
         delegate_v2_count: state.action_counts.get("DelegateV2").copied().unwrap_or(0),
+        in_flight_bucket_labels: in_flight_bucket_labels(),
         distances,
     }
 }
@@ -181,7 +184,7 @@ pub fn render_text(state: &ScanState, report: &Report) -> String {
         "cumulative txs",
         "cum share",
         "accounts",
-        "in flight histogram (1,2,3,...,8+)"
+        format!("in flight histogram ({})", in_flight_bucket_labels().join(","))
     );
     for distance in &report.distances {
         let label = if distance.distance_chunks == 0 {
