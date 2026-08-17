@@ -11,9 +11,13 @@ pub fn save(path: &Path, state: &ScanState) -> anyhow::Result<()> {
         .with_context(|| format!("renaming {} to {}", temporary.display(), path.display()))
 }
 
-/// Reads a checkpoint if one exists and describes the same scan. A checkpoint
-/// of a different range is an error rather than a silent restart, because the
-/// counters it holds would be meaningless for the new range.
+/// Reads a checkpoint if one exists and describes the same scan.
+///
+/// A later `end_height` extends the range and keeps every counter, because the
+/// scan only ever moves forward and the per-shard windows carry over. A
+/// different `start_height`, or an earlier `end_height`, would leave the
+/// counters describing blocks outside the requested range, so both are errors
+/// rather than a silent restart.
 pub fn load(
     path: &Path,
     chain_id: &str,
@@ -24,17 +28,25 @@ pub fn load(
         return Ok(None);
     }
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let state: ScanState =
+    let mut state: ScanState =
         serde_json::from_slice(&bytes).with_context(|| format!("decoding {}", path.display()))?;
     if state.chain_id != chain_id {
         bail!("checkpoint is for chain {}, node reports {chain_id}", state.chain_id);
     }
-    if state.start_height != start_height || state.end_height != end_height {
+    if state.start_height != start_height {
+        bail!("checkpoint starts at {}, requested {start_height}", state.start_height);
+    }
+    if end_height < state.end_height {
         bail!(
-            "checkpoint covers {}..={}, requested {start_height}..={end_height}",
+            "checkpoint already covers {}..={}, and a shorter range ending {end_height} would \
+             leave its counters describing blocks outside it",
             state.start_height,
             state.end_height
         );
+    }
+    if end_height > state.end_height {
+        eprintln!("extending the range from {} to {end_height}", state.end_height);
+        state.end_height = end_height;
     }
     eprintln!(
         "resuming from {}, {} of {} blocks already scanned",
