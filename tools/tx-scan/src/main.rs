@@ -183,6 +183,13 @@ struct HistoricalContractsArgs {
 /// How many per-account failures to print before staying quiet about them.
 const MAX_REPORTED_FAILURES: u64 = 10;
 
+/// A whole batch failing in a row means the database handle is gone, not that
+/// these particular accounts are unreadable. RocksDB opened read only keeps no
+/// hold on its SST files, so a compaction in the running node can delete them
+/// underneath us. Stop and let the caller reopen instead of grinding through
+/// every remaining account.
+const CONSECUTIVE_FAILURES_MEANING_STORE_IS_GONE: u64 = 64;
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Scan(args) => run_scan(args),
@@ -424,6 +431,7 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
     let save_interval = args.worker.save_interval();
     let mut last_save = Instant::now();
     let mut failures = 0u64;
+    let mut consecutive_failures = 0u64;
 
     for batch in pending.chunks(args.worker.batch_size()) {
         let results = pool.install(|| {
@@ -450,10 +458,12 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
         for (account_id, result) in batch.iter().zip(results) {
             match result {
                 Ok(status) => {
+                    consecutive_failures = 0;
                     state.historical_contract_status.insert(account_id.clone(), status);
                 }
                 Err(error) => {
                     failures += 1;
+                    consecutive_failures += 1;
                     if failures <= MAX_REPORTED_FAILURES {
                         eprintln!("could not read {account_id}: {error:#}");
                     }
@@ -461,6 +471,14 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
             }
         }
         bar.advance(batch.len() as u64);
+        if consecutive_failures >= CONSECUTIVE_FAILURES_MEANING_STORE_IS_GONE {
+            checkpoint::save(&args.checkpoint, &state)?;
+            bail!(
+                "{consecutive_failures} accounts failed in a row, so the database handle is gone; \
+                 {} accounts are saved, run again to reopen and carry on",
+                state.historical_contract_status.len()
+            );
+        }
         if last_save.elapsed() >= save_interval {
             checkpoint::save(&args.checkpoint, &state)?;
             last_save = Instant::now();
