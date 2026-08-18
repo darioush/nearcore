@@ -180,6 +180,9 @@ struct HistoricalContractsArgs {
     worker: WorkerArgs,
 }
 
+/// How many per-account failures to print before staying quiet about them.
+const MAX_REPORTED_FAILURES: u64 = 10;
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Scan(args) => run_scan(args),
@@ -312,6 +315,7 @@ fn look_up_contracts(
         ProgressReporter::new(pending.len() as u64, "accounts", worker.progress_interval())?;
     let save_interval = worker.save_interval();
     let mut last_save = Instant::now();
+    let mut failures = 0u64;
 
     for batch in pending.chunks(worker.batch_size()) {
         let statuses = pool.install(|| {
@@ -321,8 +325,17 @@ fn look_up_contracts(
                 .collect::<Vec<_>>()
         });
         for (account_id, status) in batch.iter().zip(statuses) {
-            let status = status.with_context(|| format!("looking up {account_id}"))?;
-            state.contract_status.insert(account_id.clone(), status);
+            match status {
+                Ok(status) => {
+                    state.contract_status.insert(account_id.clone(), status);
+                }
+                Err(error) => {
+                    failures += 1;
+                    if failures <= MAX_REPORTED_FAILURES {
+                        eprintln!("could not look up {account_id}: {error:#}");
+                    }
+                }
+            }
         }
         bar.advance(batch.len() as u64);
         if last_save.elapsed() >= save_interval {
@@ -331,6 +344,9 @@ fn look_up_contracts(
         }
     }
     bar.finish();
+    if failures > 0 {
+        eprintln!("{failures} accounts could not be looked up; run again to retry only those");
+    }
     Ok(())
 }
 
@@ -407,6 +423,7 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
         ProgressReporter::new(pending.len() as u64, "accounts", args.worker.progress_interval())?;
     let save_interval = args.worker.save_interval();
     let mut last_save = Instant::now();
+    let mut failures = 0u64;
 
     for batch in pending.chunks(args.worker.batch_size()) {
         let results = pool.install(|| {
@@ -427,13 +444,21 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
                 })
                 .collect::<Vec<_>>()
         });
-        let mut resolved = Vec::with_capacity(batch.len());
+        // One account that cannot be read must not discard the rest of the
+        // batch, or a single bad account stops the pass from ever recording
+        // progress and every retry repeats the same work.
         for (account_id, result) in batch.iter().zip(results) {
-            let status = result.with_context(|| format!("historical read of {account_id}"))?;
-            resolved.push((account_id.clone(), status));
-        }
-        for (account_id, status) in resolved {
-            state.historical_contract_status.insert(account_id, status);
+            match result {
+                Ok(status) => {
+                    state.historical_contract_status.insert(account_id.clone(), status);
+                }
+                Err(error) => {
+                    failures += 1;
+                    if failures <= MAX_REPORTED_FAILURES {
+                        eprintln!("could not read {account_id}: {error:#}");
+                    }
+                }
+            }
         }
         bar.advance(batch.len() as u64);
         if last_save.elapsed() >= save_interval {
@@ -443,5 +468,13 @@ fn run_historical_contracts(args: HistoricalContractsArgs) -> anyhow::Result<()>
     }
     bar.finish();
     checkpoint::save(&args.checkpoint, &state)?;
-    write_report(&state, &args.report)
+    write_report(&state, &args.report)?;
+    if failures > 0 {
+        bail!(
+            "{failures} of {} accounts could not be read; the rest are saved, so running this \
+             again retries only the ones that failed",
+            pending.len()
+        );
+    }
+    Ok(())
 }
