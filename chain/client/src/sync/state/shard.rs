@@ -310,7 +310,8 @@ async fn apply_state_part(
 ) -> Result<StatePartApplyResult, near_chain::Error> {
     let key = StatePartKey(sync_hash, shard_id, part_id);
     let key_bytes = borsh::to_vec(&key).unwrap();
-    let already_applied = store.exists(DBCol::StatePartsApplied, &key_bytes);
+    let reapply_all = std::env::var("NEAR_DEBUG_REAPPLY_ALL_PARTS").is_ok();
+    let already_applied = !reapply_all && store.exists(DBCol::StatePartsApplied, &key_bytes);
     if already_applied {
         tracing::debug!(target: "sync", ?key, "state part already applied, skipping");
         return Ok(StatePartApplyResult::AlreadyApplied);
