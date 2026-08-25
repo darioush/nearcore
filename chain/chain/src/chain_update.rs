@@ -609,6 +609,22 @@ impl<'a> ChainUpdate<'a> {
             transactions,
         )?;
 
+        tracing::warn!(
+            target: "sync",
+            %shard_id,
+            total_gas_burnt = %apply_result.total_gas_burnt,
+            outcomes = apply_result.outcomes.len(),
+            processed_receipts = apply_result.processed_receipts.len(),
+            processed_yield_timeouts = apply_result.processed_yield_timeouts.len(),
+            outgoing_receipts = apply_result.outgoing_receipts.len(),
+            incoming_receipts = receipts.len(),
+            new_root = %apply_result.new_root,
+            congestion_in = ?block.block_congestion_info().get(&shard_id).map(|info| info.congestion_info),
+            congestion_out = ?apply_result.congestion_info,
+            scheduler_hash = %apply_result.bandwidth_scheduler_state_hash,
+            "state sync finalize apply result"
+        );
+
         self.chain_store_update.save_chunk(chunk);
 
         // `save_chunk` and `save_incoming_receipt` are chain-only and stay
