@@ -499,6 +499,29 @@ impl<'a> ChainUpdate<'a> {
             }
         }
         let receipts = collect_receipts_from_response(&receipt_proof_responses);
+        for response in &receipt_proof_responses {
+            let ReceiptProofResponse(hash, proofs) = response;
+            let height = self.chain_store_update.get_block_header(hash).map(|h| h.height()).ok();
+            let receipt_count: usize = proofs.iter().map(|ReceiptProof(r, _)| r.len()).sum();
+            tracing::warn!(
+                target: "sync",
+                %shard_id,
+                %hash,
+                ?height,
+                proof_count = proofs.len(),
+                receipt_count,
+                "state sync finalize incoming receipt response"
+            );
+        }
+        tracing::warn!(
+            target: "sync",
+            %shard_id,
+            headers_in_state_header = incoming_receipts_proofs.len(),
+            responses_after_filter = receipt_proof_responses.len(),
+            receipts = receipts.len(),
+            chunk_height_included = chunk.height_included(),
+            "state sync finalize receipt summary"
+        );
         let is_genesis = block_header.height() == self.chain_store_update.get_genesis_height();
         let prev_block_header = (!is_genesis)
             .then(|| self.chain_store_update.get_block_header(block_header.prev_hash()))
