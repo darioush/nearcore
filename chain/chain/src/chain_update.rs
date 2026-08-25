@@ -517,9 +517,40 @@ impl<'a> ChainUpdate<'a> {
         let block = self.chain_store_update.get_block(block_header.hash())?;
         let transactions = chunk.to_transactions().to_vec();
         let transaction_validity = if let Some(prev_block_header) = prev_block_header {
-            self.chain_store_update
+            let validity = self
+                .chain_store_update
                 .chain_store()
-                .compute_transaction_validity(&prev_block_header, &chunk)
+                .compute_transaction_validity(&prev_block_header, &chunk);
+            let rejected = validity.iter().filter(|is_valid| !**is_valid).count();
+            tracing::warn!(
+                target: "sync",
+                %shard_id,
+                total = validity.len(),
+                rejected,
+                prev_height = prev_block_header.height(),
+                "state sync finalize transaction validity"
+            );
+            for (index, is_valid) in validity.iter().enumerate() {
+                if *is_valid {
+                    continue;
+                }
+                let base_block_hash = transactions[index].transaction.block_hash();
+                let base_height = self
+                    .chain_store_update
+                    .get_block_header(base_block_hash)
+                    .map(|header| header.height())
+                    .ok();
+                tracing::warn!(
+                    target: "sync",
+                    %shard_id,
+                    index,
+                    %base_block_hash,
+                    ?base_height,
+                    prev_height = prev_block_header.height(),
+                    "state sync finalize rejected transaction"
+                );
+            }
+            validity
         } else {
             vec![true; transactions.len()]
         };
