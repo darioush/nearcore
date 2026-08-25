@@ -2862,7 +2862,21 @@ impl Chain {
                  {sync_hash} that does not match the chain commitment: {err}. this node executed \
                  the chunk differently from the network. the data directory is intact; report \
                  this with the node's config, binary version, and hardware. then restart the node \
-                 with an empty data directory."
+                 with an empty data directory. \
+                 computed_state_root={computed_state_root} committed_state_root={committed_state_root} \
+                 computed_outcome_root={computed_outcome_root} committed_outcome_root={committed_outcome_root} \
+                 computed_gas_used={computed_gas_used} committed_gas_used={committed_gas_used} \
+                 computed_balance_burnt={computed_balance_burnt} committed_balance_burnt={committed_balance_burnt} \
+                 chunk_height_included={chunk_height_included} prev_hash={prev_hash}",
+                computed_state_root = chunk_extra.state_root(),
+                committed_state_root = chunk_header.prev_state_root(),
+                computed_outcome_root = chunk_extra.outcome_root(),
+                committed_outcome_root = chunk_header.prev_outcome_root(),
+                computed_gas_used = chunk_extra.gas_used(),
+                committed_gas_used = chunk_header.prev_gas_used(),
+                computed_balance_burnt = chunk_extra.balance_burnt(),
+                committed_balance_burnt = chunk_header.prev_balance_burnt(),
+                prev_hash = sync_block.header().prev_hash(),
             ),
             Err(err) => Err(err),
         }
