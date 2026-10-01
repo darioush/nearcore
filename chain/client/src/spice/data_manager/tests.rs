@@ -8,6 +8,7 @@ use near_primitives::sharding::{ReceiptProof, ShardProof};
 use near_primitives::spice::partial_data::SpiceDataCommitment;
 use near_primitives::types::{AccountId, ShardId};
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Data parts of the encoder every test here uses: `max((5 * 0.6) as usize, 1)`.
@@ -1796,6 +1797,86 @@ mod manager {
                 )
                 .unwrap();
             assert_matches!(result, PartsOutcome::Decoded(_));
+        }
+    }
+
+    mod batching {
+        use super::*;
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_producers_wants_are_packed_into_requests_within_the_wire_caps() {
+            let (chain, blocks) = chain_with_blocks(2);
+            let unpacked = PullConfig::default();
+            let cap = TOTAL_PARTS - 1;
+            let packed = PullConfig {
+                max_parts_per_request: NonZeroUsize::new(cap).unwrap(),
+                ..PullConfig::default()
+            };
+            let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
+            let backer = producers()[0].clone();
+            let ids = [receipt_id(&blocks[0], 0, 1), receipt_id(&blocks[1], 0, 1)];
+            // The same producer backs both items, so it is asked for the four gaps of each.
+            let run = |config: PullConfig| {
+                let mut manager = TestManager::with(&chain, config, producers(), Vec::new());
+                for (block, id) in blocks.iter().zip(&ids) {
+                    manager.manager.track_block(&block).unwrap();
+                    manager.push(&backer, id, &commitment, parts_with_ordinals(&parts, &[0]));
+                }
+                manager.certify_up_to(2);
+                manager
+                    .on_block_processed(&blocks[1])
+                    .into_iter()
+                    .filter(|request| request.producer == backer)
+                    .collect::<Vec<_>>()
+            };
+
+            let unpacked = run(unpacked);
+            let packed = run(packed);
+
+            assert_eq!(unpacked.len(), 1);
+            assert_eq!(unpacked[0].wants.len(), 2, "both items ask the backer: {unpacked:?}");
+            assert_eq!(packed.len(), 2, "eight ordinals over a cap of {cap}: {packed:?}");
+            for request in &packed {
+                let ordinals: usize = request.wants.values().map(BTreeSet::len).sum();
+                assert!(ordinals <= cap, "request over the cap: {request:?}");
+            }
+            let repacked: BTreeMap<DataId, BTreeSet<u64>> =
+                packed.into_iter().flat_map(|request| request.wants).collect();
+            assert_eq!(repacked, unpacked[0].wants);
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn an_items_ask_larger_than_one_request_spans_requests() {
+            let (chain, blocks) = chain_with_blocks(1);
+            let config = PullConfig {
+                max_parts_per_request: NonZeroUsize::new(3).unwrap(),
+                ..PullConfig::default()
+            };
+            let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
+            let backer = producers()[0].clone();
+            let id = receipt_id(&blocks[0], 0, 1);
+            let mut manager = TestManager::with(&chain, config, producers(), Vec::new());
+            manager.manager.track_block(&blocks[0]).unwrap();
+            manager.push(&backer, &id, &commitment, parts_with_ordinals(&parts, &[0]));
+            manager.certify_up_to(1);
+
+            let requests: Vec<PullRequest> = manager
+                .on_block_processed(&blocks[0])
+                .into_iter()
+                .filter(|request| request.producer == backer)
+                .collect();
+
+            assert_eq!(requests.len(), 2, "four gaps over a cap of three: {requests:?}");
+            let mut asked = BTreeSet::new();
+            for request in &requests {
+                assert_eq!(request.wants.keys().collect::<Vec<_>>(), vec![&id]);
+                let ordinals = &request.wants[&id];
+                assert!(ordinals.len() <= 3, "request over the cap: {request:?}");
+                asked.extend(ordinals.iter().copied());
+            }
+            assert_eq!(asked, BTreeSet::from([1, 2, 3, 4]));
         }
     }
 

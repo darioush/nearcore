@@ -507,7 +507,11 @@ impl SpiceDataDistributorActor {
         const PROCESSED_CONTRACT_CODE_REQUESTS_CACHE_SIZE: NonZeroUsize =
             NonZeroUsize::new(30).unwrap();
         let data_manager = SpiceDataManager::new(
-            PullConfig::default(),
+            PullConfig {
+                max_ids_per_request: const { NonZeroUsize::new(MAX_REQUESTED_DATA_IDS).unwrap() },
+                max_parts_per_request: const { NonZeroUsize::new(MAX_REQUESTED_PARTS).unwrap() },
+                ..PullConfig::default()
+            },
             DATA_PARTS_RATIO,
             chain_store.clone(),
             Policies::new(chain_store.clone(), epoch_manager.clone(), shard_tracker.clone()),
