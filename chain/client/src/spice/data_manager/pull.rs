@@ -1,6 +1,7 @@
-use super::item::FetchItem;
+use super::item::{CodedTracker, CommitmentState, FetchItem};
 use super::{DataId, DataPolicy, SpiceDataManager};
 use near_async::time::{Duration, Instant};
+use near_primitives::spice::partial_data::SpiceDataCommitment;
 use near_primitives::types::AccountId;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,6 +42,20 @@ pub(crate) fn rotated_source_index(
     (hasher.finish().wrapping_add(round) % num_sources as u64) as usize
 }
 
+impl CodedTracker {
+    /// The member of `pool` at the rotation: moves the rotation past that member.
+    fn take_next_source(&mut self, pool: &[AccountId]) -> Option<AccountId> {
+        if pool.is_empty() {
+            return None;
+        }
+        let start = (self.rotation_cursor % pool.len() as u64) as usize;
+        let source = pool[start].clone();
+        // the next rotation starts right after the member asked
+        self.rotation_cursor = self.rotation_cursor.wrapping_add(1);
+        Some(source)
+    }
+}
+
 impl FetchItem {
     /// Drops every pull unanswered for `request_timeout` as of `now`.
     pub(super) fn drop_stale_pulls(&mut self, now: Instant, request_timeout: Duration) {
@@ -54,10 +69,45 @@ impl FetchItem {
         }
     }
 
-    /// Producers to ask at `now`, with the ordinals to ask each: every producer without a
-    /// verified part and without a request outstanding, for its own ordinal.
+    /// The producers with a pull from this item unanswered.
+    // TODO(review-split): read by the producer budget in the next step.
+    #[allow(dead_code)]
+    pub(super) fn outstanding_pulls(&self) -> impl Iterator<Item = &AccountId> {
+        self.producers
+            .iter()
+            .filter(|(_, state)| state.requested_at.is_some())
+            .map(|(producer, _)| producer)
+    }
+
+    /// Producers to ask at `now`, with the ordinals to ask each. A bound producer is asked
+    /// only by its commitment's tracker, one request at a time; an unbound one only for its
+    /// own ordinal.
     pub(super) fn pull_wants(&mut self, now: Instant) -> BTreeMap<AccountId, BTreeSet<u64>> {
         let mut wants: BTreeMap<AccountId, BTreeSet<u64>> = BTreeMap::new();
+        let live: Vec<SpiceDataCommitment> = self
+            .commitments
+            .iter()
+            .filter(|(_, state)| matches!(state, CommitmentState::Tracking(_)))
+            .map(|(commitment, _)| commitment.clone())
+            .collect();
+        for commitment in live {
+            let asked = self.producers.iter().any(|(_, state)| {
+                state.commitment.as_ref() == Some(&commitment) && state.requested_at.is_some()
+            });
+            if asked {
+                continue;
+            }
+            let mut pool: Vec<AccountId> =
+                self.contributors(&commitment).into_iter().cloned().collect();
+            pool.sort();
+            let tracker = self.tracker_mut(&commitment).expect("live commitment is tracked");
+            let Some(source) = tracker.take_next_source(&pool) else {
+                continue;
+            };
+            let missing = tracker.missing_ordinals();
+            self.producer_mut(&source).expect("pool member is a producer").requested_at = Some(now);
+            wants.entry(source).or_default().extend(missing);
+        }
         for (ordinal, (producer, state)) in self.producers.iter_mut().enumerate() {
             let engaged = state.commitment.is_some() || state.requested_at.is_some();
             if engaged {

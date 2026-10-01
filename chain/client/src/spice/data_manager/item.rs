@@ -84,6 +84,17 @@ impl FetchItem {
         self.producers.iter_mut().find(|(producer, _)| producer == account).map(|(_, state)| state)
     }
 
+    /// The tracker still collecting under `commitment`, if any.
+    pub(super) fn tracker_mut(
+        &mut self,
+        commitment: &SpiceDataCommitment,
+    ) -> Option<&mut CodedTracker> {
+        match self.commitments.get_mut(commitment) {
+            Some(CommitmentState::Tracking(tracker)) => Some(tracker),
+            Some(CommitmentState::Settled) | None => None,
+        }
+    }
+
     /// Senders contributed to `commitment`.
     pub(super) fn contributors(&self, commitment: &SpiceDataCommitment) -> HashSet<&AccountId> {
         self.producers
@@ -196,6 +207,10 @@ impl VerifiedCodedPart {
 /// Accumulates parts toward decoding under one claimed commitment.
 pub(crate) struct CodedTracker {
     parts: ReedSolomonPartsTracker<SpiceData>,
+    total_parts: usize,
+    /// Position in the pool's rotation; starts at random so requesters spread over the
+    /// pool, and moves past each member asked.
+    pub(super) rotation_cursor: u64,
 }
 
 impl fmt::Debug for CodedTracker {
@@ -210,7 +225,19 @@ impl fmt::Debug for CodedTracker {
 
 impl CodedTracker {
     fn new(encoder: Arc<ReedSolomonEncoder>, encoded_length: usize) -> Self {
-        Self { parts: ReedSolomonPartsTracker::new(encoder, encoded_length) }
+        Self {
+            total_parts: encoder.total_parts(),
+            parts: ReedSolomonPartsTracker::new(encoder, encoded_length),
+            rotation_cursor: rand::random(),
+        }
+    }
+
+    /// Ordinals not held yet.
+    pub(super) fn missing_ordinals(&self) -> Vec<u64> {
+        (0..self.total_parts)
+            .filter(|ordinal| !self.parts.has_part(*ordinal))
+            .map(|ordinal| ordinal as u64)
+            .collect()
     }
 
     /// Inserts a part; the decoding insert checks the data against `commitment`'s hash
