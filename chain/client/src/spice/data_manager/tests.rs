@@ -438,7 +438,7 @@ fn garbage_backer_stays_bound_to_the_settled_commitment() {
 mod manager {
     use super::*;
     use crate::spice::chunk_executor_actor::save_receipt_proof;
-    use near_async::time::Clock;
+    use near_async::time::{Clock, FakeClock};
     use near_chain::test_utils::{get_chain_with_num_shards, process_block_sync};
     use near_chain::{Block, BlockProcessingArtifact, Chain, ChainStoreAccess, Provenance};
     use near_chain_configs::{MutableConfigValue, TrackedShardsConfig};
@@ -453,6 +453,7 @@ mod manager {
     use near_primitives::types::{ChunkExecutionResult, SpiceChunkId};
     use near_store::adapter::{StoreAdapter, StoreUpdateAdapter};
     use near_store::{ShardUId, Store};
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A two-shard chain with `num_blocks` processed empty blocks; `blocks[i]` is at
     /// height `i + 1`.
@@ -512,6 +513,14 @@ mod manager {
             .build()
     }
 
+    /// Writes `block` and its header to the chain's store, as block processing would.
+    fn save_block(chain: &mut Chain, block: &Arc<Block>) {
+        let mut store_update = chain.mut_chain_store().store_update();
+        store_update.save_block_header(block.header().clone()).unwrap();
+        store_update.save_block(block.clone());
+        store_update.commit().unwrap();
+    }
+
     /// A chain with canonical blocks at heights 1, 2 and 4, and two forks off height 2:
     /// one at the skipped height 3, one at height 4. Returned as
     /// `(chain, canonical, [fork_at_3, fork_at_4])`.
@@ -524,11 +533,13 @@ mod manager {
         (chain, canonical, [fork_at_3, fork_at_4])
     }
 
-    /// The chain's policies with a fixed producer list in place of the chain's single
+    /// The chain's policies with fixed producer lists in place of the chain's single
     /// chunk producer and extra receipt-proof (from, to) pairs.
     struct TestPolicy {
         chain: Policies,
         producers: Vec<AccountId>,
+        /// Producers for items from these shards, in place of `producers`.
+        producers_by_from_shard: HashMap<u64, Vec<AccountId>>,
         /// `(from_shard, to_shard)` pairs needed from every block on top of the chain's.
         extra_pairs: Vec<(u64, u64)>,
         /// Ids whose producer lookup fails.
@@ -561,7 +572,9 @@ mod manager {
             if self.failing_lookups.contains(id) {
                 return Err(Error::Other("no producers".to_string()));
             }
-            Ok(self.producers.clone())
+            let DataId::ReceiptProof { source, .. } = id;
+            let from_shard: u64 = source.shard_id.into();
+            Ok(self.producers_by_from_shard.get(&from_shard).unwrap_or(&self.producers).clone())
         }
 
         fn opening_chunks(&self, id: &DataId) -> Vec<SpiceChunkId> {
@@ -574,21 +587,49 @@ mod manager {
         (0..TOTAL_PARTS).map(|i| account(&format!("producer{i}.near"))).collect()
     }
 
+    fn ordinals(ordinals: &[u64]) -> BTreeSet<u64> {
+        ordinals.iter().copied().collect()
+    }
+
+    type WantsByProducer = BTreeMap<AccountId, BTreeMap<DataId, BTreeSet<u64>>>;
+
+    fn by_producer(requests: Vec<PullRequest>) -> WantsByProducer {
+        requests.into_iter().map(|request| (request.producer, request.wants)).collect()
+    }
+
+    /// The requests as `producer -> ordinals` for the one item `id`.
+    fn wants_for(requests: Vec<PullRequest>, id: &DataId) -> BTreeMap<AccountId, BTreeSet<u64>> {
+        by_producer(requests)
+            .into_iter()
+            .map(|(producer, mut wants)| {
+                let ordinals = wants.remove(id).unwrap_or_else(|| panic!("no wants for {id:?}"));
+                assert!(wants.is_empty(), "wants for other items: {wants:?}");
+                (producer, ordinals)
+            })
+            .collect()
+    }
+
     /// A manager whose policy applies shard 1 only: of a block's four proofs it needs
     /// `(0 -> 1)`, unless that proof is on disk. Nothing is certified until
     /// `certify_up_to` says so, and nothing is finally executed until
-    /// `set_final_execution_head` says so.
+    /// `set_final_execution_head` says so. Time stands still until `clock` is advanced.
     struct TestManager {
         manager: SpiceDataManager<TestPolicy>,
+        clock: FakeClock,
         store: Store,
     }
 
     impl TestManager {
         fn new(chain: &Chain) -> Self {
-            Self::with(chain, producers(), Vec::new())
+            Self::with(chain, PullConfig::default(), producers(), Vec::new())
         }
 
-        fn with(chain: &Chain, producers: Vec<AccountId>, extra_pairs: Vec<(u64, u64)>) -> Self {
+        fn with(
+            chain: &Chain,
+            pull_config: PullConfig,
+            producers: Vec<AccountId>,
+            extra_pairs: Vec<(u64, u64)>,
+        ) -> Self {
             let shard_layout = chain.epoch_manager.get_shard_layout(&EpochId::default()).unwrap();
             let tracked = ShardUId::from_shard_id_and_layout(ShardId::new(1), &shard_layout);
             let shard_tracker = ShardTracker::new(
@@ -602,11 +643,16 @@ mod manager {
             let policy = TestPolicy {
                 chain: policies,
                 producers,
+                producers_by_from_shard: HashMap::new(),
                 extra_pairs,
                 failing_lookups: HashSet::new(),
                 failing_done_checks: HashSet::new(),
             };
-            Self { manager: SpiceDataManager::new(0.6, store.chain_store(), policy), store }
+            Self {
+                manager: SpiceDataManager::new(pull_config, 0.6, store.chain_store(), policy),
+                clock: FakeClock::default(),
+                store,
+            }
         }
 
         /// Records a block certifying both shards' chunks of every canonical block up to
@@ -632,8 +678,14 @@ mod manager {
             store_update.commit();
         }
 
-        fn on_block_processed(&mut self, block: &Block) {
-            self.manager.on_block_processed(block.hash())
+        /// Items from `from_shard` are served by `producers` instead of the default list.
+        fn set_producers_for(&mut self, from_shard: u64, producers: Vec<AccountId>) {
+            self.manager.policies.producers_by_from_shard.insert(from_shard, producers);
+        }
+
+        /// `block` was processed at the clock's current time.
+        fn on_block_processed(&mut self, block: &Block) -> Vec<PullRequest> {
+            self.manager.on_block_processed(block.hash(), self.clock.now())
         }
 
         /// Delivers enough parts of `data` from `sender` to decode `id`.
@@ -757,10 +809,11 @@ mod manager {
         manager.set_final_execution_head(&blocks[0]);
 
         // Height 1 is finally executed: neither the processed block nor a later track adds it.
-        manager.on_block_processed(&blocks[0]);
+        let requests = manager.on_block_processed(&blocks[0]);
         manager.manager.track_block(&blocks[0]).unwrap();
         manager.manager.track_block(&blocks[1]).unwrap();
 
+        assert_eq!(requests, vec![]);
         assert!(!manager.manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
         assert!(manager.manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
     }
@@ -1015,7 +1068,7 @@ mod manager {
             let (chain, canonical, [fork_at_3, fork_at_4]) = chain_with_forks();
             let mut manager = TestManager::new(&chain);
             for block in canonical.iter().chain([&fork_at_3, &fork_at_4]) {
-                manager.manager.track_block(&block).unwrap();
+                manager.manager.track_block(block).unwrap();
             }
             let fork_ids = [receipt_id(&fork_at_3, 0, 1), receipt_id(&fork_at_4, 0, 1)];
 
@@ -1053,6 +1106,45 @@ mod manager {
 
         #[test]
         #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn an_item_is_pulled_from_the_processed_block_that_certifies_its_chunk_and_not_before() {
+            let (mut chain, blocks, id, mut manager) = tracked_item(1);
+            let certified =
+                SpiceChunkId { block_hash: *blocks[0].hash(), shard_id: ShardId::new(0) };
+            let certifier = certifying_block(&blocks[0], &[certified]);
+            save_block(&mut chain, &certifier);
+
+            assert_eq!(manager.on_block_processed(&blocks[0]), vec![]);
+
+            let requests = wants_for(manager.on_block_processed(&certifier), &id);
+            let own_ordinal_asks: BTreeMap<AccountId, BTreeSet<u64>> = producers()
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, producer)| (producer, ordinals(&[ordinal as u64])))
+                .collect();
+            assert_eq!(requests, own_ordinal_asks);
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn an_item_tracked_after_its_certifying_block_is_pulled() {
+            let (chain, blocks) = chain_with_blocks(1);
+            let id = receipt_id(&blocks[0], 0, 1);
+            let mut manager = TestManager::new(&chain);
+            manager.certify_up_to(1);
+
+            manager.manager.track_block(&blocks[0]).unwrap();
+
+            let requests = wants_for(manager.on_block_processed(&blocks[0]), &id);
+            let own_ordinal_asks: BTreeMap<AccountId, BTreeSet<u64>> = producers()
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, producer)| (producer, ordinals(&[ordinal as u64])))
+                .collect();
+            assert_eq!(requests, own_ordinal_asks);
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
         fn certified_chunks_are_forgotten_at_the_final_execution_head() {
             let (_chain, blocks, _id, mut manager) = tracked_item(3);
             manager.certify_up_to(2);
@@ -1069,16 +1161,58 @@ mod manager {
 
         #[test]
         #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-        fn a_done_item_is_removed_at_the_processed_block() {
+        fn a_done_item_is_removed_at_the_processed_block_without_a_request() {
             let (chain, blocks, id, mut manager) = tracked_item(1);
             manager.deliver(&producers()[0], &id, &receipt_data(0, 1));
+            manager.certify_up_to(1);
             // The consumer saved the delivered data before the block was processed.
             save_proof(&chain, &blocks[0], &receipt_data(0, 1));
 
-            manager.on_block_processed(&blocks[0]);
+            let requests = manager.on_block_processed(&blocks[0]);
 
+            assert_eq!(requests, vec![]);
             assert!(!manager.manager.is_tracking(&id));
             assert!(manager.manager.items_by_height.is_empty());
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn producers_are_resolved_when_the_item_is_tracked_and_never_at_the_trigger() {
+            let (chain, blocks) = chain_with_blocks(1);
+            let block = &blocks[0];
+            let mut manager =
+                TestManager::with(&chain, PullConfig::default(), producers(), vec![(1, 1)]);
+            let shard1_producers: Vec<AccountId> =
+                (0..TOTAL_PARTS).map(|i| account(&format!("shard1-producer{i}.near"))).collect();
+            manager.set_producers_for(1, shard1_producers.clone());
+            let from_shard0 = receipt_id(block, 0, 1);
+            let from_shard1 = receipt_id(block, 1, 1);
+
+            manager.manager.track_block(&block).unwrap();
+
+            // The producer sets change after tracking; the items keep the ones resolved then.
+            let swapped: Vec<AccountId> =
+                (0..TOTAL_PARTS).map(|i| account(&format!("swapped{i}.near"))).collect();
+            manager.set_producers_for(0, swapped.clone());
+            manager.set_producers_for(1, swapped);
+            manager.certify_up_to(1);
+
+            let requests = by_producer(manager.on_block_processed(block));
+
+            let mut expected = WantsByProducer::new();
+            for (ordinal, producer) in producers().into_iter().enumerate() {
+                expected.insert(
+                    producer,
+                    BTreeMap::from([(from_shard0.clone(), ordinals(&[ordinal as u64]))]),
+                );
+            }
+            for (ordinal, producer) in shard1_producers.into_iter().enumerate() {
+                expected.insert(
+                    producer,
+                    BTreeMap::from([(from_shard1.clone(), ordinals(&[ordinal as u64]))]),
+                );
+            }
+            assert_eq!(requests, expected);
         }
 
         #[test]
@@ -1090,18 +1224,19 @@ mod manager {
                 manager.manager.track_block(&block).unwrap();
             }
             let ids: Vec<DataId> = blocks.iter().map(|block| receipt_id(block, 0, 1)).collect();
+            manager.certify_up_to(3);
 
-            // The proof is on disk but nothing delivered it: the item stays tracked.
+            // The proof is on disk but nothing delivered it: the store is not consulted, so the
+            // item stays tracked and is asked for like the others.
             save_proof(&chain, &blocks[0], &receipt_data(0, 1));
-            manager.on_block_processed(&blocks[2]);
+            let requests = by_producer(manager.on_block_processed(&blocks[2]));
+            for (ordinal, producer) in producers().iter().enumerate() {
+                assert_eq!(requests[producer][&ids[0]], ordinals(&[ordinal as u64]));
+            }
+            assert_eq!(manager.on_block_processed(&blocks[2]), vec![]);
             assert!(manager.manager.is_tracking(&ids[0]));
 
-            // Delivered but not saved: the item stays tracked.
-            manager.deliver(&producers()[0], &ids[1], &receipt_data(0, 1));
-            manager.on_block_processed(&blocks[2]);
-            assert!(manager.manager.is_tracking(&ids[1]));
-
-            // Delivered and saved: the next block removes it and leaves the others.
+            // Delivered: the store is consulted and confirms the item is done.
             manager.deliver(&producers()[0], &ids[0], &receipt_data(0, 1));
             manager.on_block_processed(&blocks[2]);
             assert!(!manager.manager.is_tracking(&ids[0]));
@@ -1111,10 +1246,39 @@ mod manager {
 
         #[test]
         #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn an_item_whose_delivery_was_rejected_is_asked_for_until_its_proof_is_saved() {
+            let (chain, blocks, id, mut manager) = tracked_item(1);
+            manager.certify_up_to(1);
+            manager.deliver(&producers()[0], &id, &receipt_data(0, 1));
+            // The deliverer backed a settled commitment, so only the others are asked.
+            let own_ordinal_asks: BTreeMap<AccountId, BTreeSet<u64>> = producers()
+                .into_iter()
+                .enumerate()
+                .skip(1)
+                .map(|(ordinal, producer)| (producer, ordinals(&[ordinal as u64])))
+                .collect();
+
+            // The consumer saved nothing: the store keeps saying the item is not done, so it
+            // stays tracked and is asked for again once its requests time out.
+            assert_eq!(wants_for(manager.on_block_processed(&blocks[0]), &id), own_ordinal_asks);
+            assert!(manager.manager.is_tracking(&id));
+            manager.clock.advance(PullConfig::default().request_timeout);
+            assert_eq!(wants_for(manager.on_block_processed(&blocks[0]), &id), own_ordinal_asks);
+            assert!(manager.manager.is_tracking(&id));
+
+            // Saved: the next block removes it.
+            save_proof(&chain, &blocks[0], &receipt_data(0, 1));
+            assert_eq!(manager.on_block_processed(&blocks[0]), vec![]);
+            assert!(!manager.manager.is_tracking(&id));
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
         fn a_failed_producer_lookup_tracks_none_of_the_blocks_items() {
             let (chain, blocks) = chain_with_blocks(1);
             let block = &blocks[0];
-            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            let mut manager =
+                TestManager::with(&chain, PullConfig::default(), producers(), vec![(1, 1)]);
             let resolvable = receipt_id(block, 0, 1);
             let failing = receipt_id(block, 1, 1);
             manager.manager.policies.failing_lookups.insert(failing.clone());
@@ -1130,7 +1294,8 @@ mod manager {
         fn a_failed_done_check_tracks_none_of_the_blocks_items() {
             let (chain, blocks) = chain_with_blocks(1);
             let block = &blocks[0];
-            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            let mut manager =
+                TestManager::with(&chain, PullConfig::default(), producers(), vec![(1, 1)]);
             let resolvable = receipt_id(block, 0, 1);
             let failing = receipt_id(block, 1, 1);
             manager.manager.policies.failing_done_checks.insert(failing.clone());
@@ -1143,9 +1308,30 @@ mod manager {
 
         #[test]
         #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_failed_producer_lookup_on_the_processed_block_still_pulls_the_older_open_items() {
+            let (chain, blocks) = chain_with_blocks(2);
+            let mut manager =
+                TestManager::with(&chain, PullConfig::default(), producers(), vec![(1, 1)]);
+            manager.manager.track_block(&blocks[0]).unwrap();
+            let older = receipt_id(&blocks[0], 0, 1);
+            let failing = receipt_id(&blocks[1], 1, 1);
+            manager.manager.policies.failing_lookups.insert(failing.clone());
+            manager.certify_up_to(1);
+
+            let requests = by_producer(manager.on_block_processed(&blocks[1]));
+
+            for (ordinal, producer) in producers().iter().enumerate() {
+                assert_eq!(requests[producer][&older], ordinals(&[ordinal as u64]));
+            }
+            assert!(!manager.manager.is_tracking(&failing));
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
         fn a_failed_producer_lookup_on_the_processed_block_still_removes_the_done_items() {
             let (chain, blocks) = chain_with_blocks(2);
-            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            let mut manager =
+                TestManager::with(&chain, PullConfig::default(), producers(), vec![(1, 1)]);
             manager.manager.track_block(&blocks[0]).unwrap();
             let older = receipt_id(&blocks[0], 0, 1);
             let failing = receipt_id(&blocks[1], 1, 1);

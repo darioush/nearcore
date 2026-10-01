@@ -298,6 +298,7 @@ impl ActorBuilder {
             }),
         };
         SpiceDataDistributorActor::new(
+            Clock::real(),
             epoch_manager.clone(),
             chain.chain_store.store().chain_store(),
             validator_signer,

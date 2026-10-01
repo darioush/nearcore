@@ -11,6 +11,7 @@ pub(crate) use fetchable::DataPolicy;
 use fetchable::ReceiptProofPolicy;
 pub(crate) use item::{AssembledDataError, SpiceData, VerifiedCodedPart};
 use item::{FetchItem, PartInsertResult};
+use near_async::time::Instant;
 use near_chain::{Block, Error};
 use near_epoch_manager::EpochManagerAdapter;
 use near_epoch_manager::shard_tracker::ShardTracker;
@@ -21,7 +22,7 @@ use near_primitives::spice::partial_data::{SpiceDataCommitment, SpiceDataPart};
 use near_primitives::types::{AccountId, BlockHeight, SpiceChunkId};
 use near_store::adapter::chain_store::ChainStoreAdapter;
 pub(crate) use pending::PendingPartialData;
-pub(crate) use pull::rotated_source_index;
+pub(crate) use pull::{PullConfig, PullRequest, rotated_source_index};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::replace;
 use std::sync::Arc;
@@ -103,11 +104,13 @@ impl DataPolicy for Policies {
     }
 }
 
-/// Owns the per-item fetch lifecycle: what this node still needs, the parts received so
-/// far and who sent them, and when an item stops being relevant.
+/// Owns the per-item fetch state: what this node still needs, the parts received so far
+/// and who sent them, the pull requests outstanding, and when an item stops being
+/// relevant.
 // TODO(spice-data-distribution): only receipt proofs route here; witnesses still live
 // on the old actor path (#16275).
 pub(crate) struct SpiceDataManager<P: DataPolicy = Policies> {
+    pull_config: PullConfig,
     encoders: ReedSolomonEncoderCache,
     chain_store: ChainStoreAdapter,
     policies: P,
@@ -123,8 +126,14 @@ pub(crate) struct SpiceDataManager<P: DataPolicy = Policies> {
 }
 
 impl<P: DataPolicy> SpiceDataManager<P> {
-    pub(crate) fn new(data_parts_ratio: f64, chain_store: ChainStoreAdapter, policies: P) -> Self {
+    pub(crate) fn new(
+        pull_config: PullConfig,
+        data_parts_ratio: f64,
+        chain_store: ChainStoreAdapter,
+        policies: P,
+    ) -> Self {
         Self {
+            pull_config,
             encoders: ReedSolomonEncoderCache::new(data_parts_ratio),
             chain_store,
             policies,
@@ -205,11 +214,16 @@ impl<P: DataPolicy> SpiceDataManager<P> {
         Ok(())
     }
 
-    /// The block was processed: expires the items at or below the final execution head,
-    /// records the chunks the block certifies, tracks the items needed from the block, and
-    /// removes the delivered ones already in the store. A failed chain read is logged and
-    /// skips only its own step.
-    pub(crate) fn on_block_processed(&mut self, block_hash: &CryptoHash) {
+    /// The block was processed at `now`: expires the items at or below the final execution
+    /// head, records the chunks the block certifies, tracks the items needed from the block,
+    /// removes the delivered ones already in the store, and returns the requests for the
+    /// pullable rest, grouped by producer. A failed chain read is logged and skips only its
+    /// own step.
+    pub(crate) fn on_block_processed(
+        &mut self,
+        block_hash: &CryptoHash,
+        now: Instant,
+    ) -> Vec<PullRequest> {
         match self.final_execution_head_height() {
             Ok(height) => self.expire_at_or_below(height),
             Err(err) => {
@@ -230,6 +244,7 @@ impl<P: DataPolicy> SpiceDataManager<P> {
             }
         }
         self.remove_done_items();
+        self.pull_requests(now)
     }
 
     /// Height of the final execution head; the genesis height before the first one is recorded.
@@ -244,9 +259,9 @@ impl<P: DataPolicy> SpiceDataManager<P> {
     /// Handles incoming parts: verifies every part's proof against the commitment before
     /// inserting any; a part failing its proof rejects the whole message and leaves the item
     /// untouched, as does an empty message, one with more than `total_parts` parts, one
-    /// repeating an ordinal, or one from a sender that is not a producer of the item. A
-    /// decoding insert checks the decoded data against the committed hash and the id, settles
-    /// the commitment either way, and returns matching data.
+    /// repeating an ordinal, or one from a sender that is not a producer of the item. A verified message counts as the sender's answer to any request
+    /// outstanding to it. A decoding insert checks the decoded data against the committed hash
+    /// and the id, settles the commitment either way, and returns matching data.
     pub(crate) fn on_parts_received(
         &mut self,
         sender: &AccountId,
@@ -279,6 +294,7 @@ impl<P: DataPolicy> SpiceDataManager<P> {
                     .ok_or(SenderFault::InvalidMerkleProof)?;
             verified.push(part);
         }
+        item.note_pull_response(sender);
         let encoder = self.encoders.entry(total_parts);
         for part in verified {
             match item.insert_part(&encoder, id, producer, part) {

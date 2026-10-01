@@ -1,5 +1,6 @@
 use super::DataId;
 use borsh::{BorshDeserialize, BorshSerialize};
+use near_async::time::Instant;
 use near_primitives::hash::hash;
 use near_primitives::merkle::{MerklePath, verify_path_with_index};
 use near_primitives::reed_solomon::{
@@ -44,6 +45,8 @@ pub(crate) struct FetchItem {
 pub(super) struct ProducerState {
     /// The commitment this producer backed, once one of its parts verified.
     pub(super) commitment: Option<SpiceDataCommitment>,
+    /// When this node asked it, while that request is unanswered.
+    pub(super) requested_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -72,10 +75,13 @@ impl FetchItem {
     }
 
     /// Whether every opening chunk is certified; only then is the item pulled.
-    // TODO(review-split): read by the pull in the next step.
-    #[allow(dead_code)]
     pub(super) fn is_pullable(&self) -> bool {
         self.uncertified_opening_chunks.is_empty()
+    }
+
+    /// The state of `account` if it is one of the item's producers.
+    pub(super) fn producer_mut(&mut self, account: &AccountId) -> Option<&mut ProducerState> {
+        self.producers.iter_mut().find(|(producer, _)| producer == account).map(|(_, state)| state)
     }
 
     /// Senders contributed to `commitment`.

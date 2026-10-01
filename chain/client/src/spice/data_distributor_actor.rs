@@ -8,8 +8,8 @@ use crate::spice::chunk_validator_actor::{
 };
 pub use crate::spice::data_manager::DataId;
 use crate::spice::data_manager::{
-    PartsOutcome, PendingPartialData, Policies, SenderFault, SpiceData, SpiceDataManager,
-    VerifiedCodedPart, rotated_source_index,
+    PartsOutcome, PendingPartialData, Policies, PullConfig, PullRequest, SenderFault, SpiceData,
+    SpiceDataManager, VerifiedCodedPart, rotated_source_index,
 };
 use itertools::Itertools as _;
 use lru::LruCache;
@@ -21,7 +21,7 @@ use near_async::messaging::CanSend;
 use near_async::messaging::Handler;
 use near_async::messaging::IntoSender;
 use near_async::messaging::Sender;
-use near_async::time::Duration;
+use near_async::time::{Clock, Duration};
 use near_chain::Block;
 use near_chain::spice::activation::{
     SpiceMessageGate, SpiceMessageKind, is_spice_or_last_pre_spice_block,
@@ -192,6 +192,7 @@ pub(crate) const MAX_REQUESTED_PARTS: usize = 256;
 /// Acts as a demux: handles messages it owns (partial data, etc) directly, and forwards the other
 /// message types (contract-{accesses,response}) to validator via injected senders.
 pub struct SpiceDataDistributorActor {
+    clock: Clock,
     chain_store: ChainStoreAdapter,
     epoch_manager: Arc<dyn EpochManagerAdapter>,
     pub(crate) core_reader: SpiceCoreReader,
@@ -473,7 +474,14 @@ impl Handler<ProcessedBlock> for SpiceDataDistributorActor {
         if let Err(err) = self.start_waiting_on_data(&block_hash) {
             tracing::error!(target: "spice_data_distribution", ?err, ?block_hash, "failure when starting waiting on data");
         }
-        self.data_manager.on_block_processed(&block_hash);
+        // TODO(spice): Allow requesting data without signer using route back. Until then the
+        // manager records the requests below as outstanding on a node that cannot send them.
+        let signer = self.validator_signer.get();
+        let me = signer.as_ref().map(|signer| signer.validator_id());
+        let requests = self.data_manager.on_block_processed(&block_hash, self.clock.now());
+        if let Some(requester) = me {
+            self.send_pull_requests(requester, requests);
+        }
         if let Err(err) = self.process_pending_partial_data(&block_hash) {
             tracing::error!(target: "spice_data_distribution", ?err, ?block_hash, "failure when processing pending partial data");
         }
@@ -482,6 +490,7 @@ impl Handler<ProcessedBlock> for SpiceDataDistributorActor {
 
 impl SpiceDataDistributorActor {
     pub fn new(
+        clock: Clock,
         epoch_manager: Arc<dyn EpochManagerAdapter>,
         chain_store: ChainStoreAdapter,
         validator_signer: MutableValidatorSigner,
@@ -498,11 +507,13 @@ impl SpiceDataDistributorActor {
         const PROCESSED_CONTRACT_CODE_REQUESTS_CACHE_SIZE: NonZeroUsize =
             NonZeroUsize::new(30).unwrap();
         let data_manager = SpiceDataManager::new(
+            PullConfig::default(),
             DATA_PARTS_RATIO,
             chain_store.clone(),
             Policies::new(chain_store.clone(), epoch_manager.clone(), shard_tracker.clone()),
         );
         Self {
+            clock,
             data_manager,
             // TODO(spice): Evaluate whether the same data parts ratio makes sense for all data
             // distributed.
@@ -557,6 +568,19 @@ impl SpiceDataDistributorActor {
         #[cfg(feature = "test_features")]
         {
             *self.malformed_data_requests.entry(*reason).or_default() += 1;
+        }
+    }
+
+    fn send_pull_requests(&self, requester: &AccountId, requests: Vec<PullRequest>) {
+        for PullRequest { producer, wants } in requests {
+            let wants =
+                wants.into_iter().map(|(id, ordinals)| (SpiceDataIdentifier::from(&id), ordinals));
+            self.network_adapter.send(PeerManagerMessageRequest::NetworkRequests(
+                NetworkRequests::SpiceDataRequest {
+                    request: SpiceDataRequest::new(wants.collect(), requester.clone()),
+                    producer,
+                },
+            ));
         }
     }
 
