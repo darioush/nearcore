@@ -4,6 +4,7 @@ mod data_id;
 mod fetchable;
 mod item;
 mod pending;
+mod pull;
 
 pub use data_id::DataId;
 pub(crate) use fetchable::DataPolicy;
@@ -20,6 +21,7 @@ use near_primitives::spice::partial_data::{SpiceDataCommitment, SpiceDataPart};
 use near_primitives::types::{AccountId, BlockHeight};
 use near_store::adapter::chain_store::ChainStoreAdapter;
 pub(crate) use pending::PendingPartialData;
+pub(crate) use pull::rotated_source_index;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::replace;
 use std::sync::Arc;
