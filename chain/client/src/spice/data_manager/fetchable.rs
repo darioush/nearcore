@@ -5,7 +5,7 @@ use near_chain_primitives::ApplyChunksMode;
 use near_epoch_manager::EpochManagerAdapter;
 use near_epoch_manager::shard_tracker::ShardTracker;
 use near_primitives::block_header::BlockHeader;
-use near_primitives::types::{AccountId, ShardId};
+use near_primitives::types::{AccountId, ShardId, SpiceChunkId};
 use near_store::adapter::StoreAdapter;
 use near_store::adapter::chain_store::ChainStoreAdapter;
 use std::sync::Arc;
@@ -23,6 +23,9 @@ pub(crate) trait DataPolicy {
 
     /// The item's producers; producer `i` produced part `i`.
     fn producers(&self, id: &DataId) -> Result<Vec<AccountId>, Error>;
+
+    /// The chunks that must all be certified before the item is pulled.
+    fn opening_chunks(&self, id: &DataId) -> Vec<SpiceChunkId>;
 }
 
 /// Receipt proofs: produced by the source chunk's producers, needed by nodes that apply
@@ -85,5 +88,11 @@ impl DataPolicy for ReceiptProofPolicy {
         Ok(self
             .epoch_manager
             .get_epoch_chunk_producers_for_shard(block_header.epoch_id(), source.shard_id)?)
+    }
+
+    /// The source chunk.
+    fn opening_chunks(&self, id: &DataId) -> Vec<SpiceChunkId> {
+        let DataId::ReceiptProof { source, .. } = id;
+        vec![source.clone()]
     }
 }

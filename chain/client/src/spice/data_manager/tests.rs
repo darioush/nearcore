@@ -107,7 +107,7 @@ fn producer(index: usize) -> AccountId {
 
 /// An item with two disjoint groups of `DATA_PARTS` producers.
 fn test_item() -> FetchItem {
-    FetchItem::new(1, (0..2 * DATA_PARTS).map(producer).collect())
+    FetchItem::new(1, (0..2 * DATA_PARTS).map(producer).collect(), Vec::new())
 }
 
 /// Inserts the first `DATA_PARTS` of `parts`, each from its own producer counting up from
@@ -444,10 +444,13 @@ mod manager {
     use near_chain_configs::{MutableConfigValue, TrackedShardsConfig};
     use near_epoch_manager::shard_tracker::ShardTracker;
     use near_primitives::block::Tip;
+    use near_primitives::block_body::SpiceCoreStatement;
     use near_primitives::block_header::BlockHeader;
     use near_primitives::spice::partial_data::SpiceDataPart;
     use near_primitives::test_utils::{TestBlockBuilder, create_test_signer};
+    use near_primitives::types::chunk_extra::ChunkExtra;
     use near_primitives::types::{BlockHeight, EpochId};
+    use near_primitives::types::{ChunkExecutionResult, SpiceChunkId};
     use near_store::adapter::{StoreAdapter, StoreUpdateAdapter};
     use near_store::{ShardUId, Store};
 
@@ -489,6 +492,24 @@ mod manager {
         )
         .unwrap();
         block
+    }
+
+    /// A block on `prev` whose core statements certify `chunk_ids`. Not validated or processed.
+    fn certifying_block(prev: &Block, chunk_ids: &[SpiceChunkId]) -> Arc<Block> {
+        let statements = chunk_ids
+            .iter()
+            .map(|chunk_id| SpiceCoreStatement::ChunkExecutionResult {
+                chunk_id: chunk_id.clone(),
+                execution_result: ChunkExecutionResult {
+                    chunk_extra: ChunkExtra::new_with_only_state_root(&chunk_id.block_hash),
+                    outgoing_receipts_root: CryptoHash::default(),
+                },
+            })
+            .collect();
+        let signer = Arc::new(create_test_signer("test1"));
+        TestBlockBuilder::from_prev_block(Clock::real(), prev, signer)
+            .spice_core_statements(statements)
+            .build()
     }
 
     /// A chain with canonical blocks at heights 1, 2 and 4, and two forks off height 2:
@@ -542,6 +563,10 @@ mod manager {
             }
             Ok(self.producers.clone())
         }
+
+        fn opening_chunks(&self, id: &DataId) -> Vec<SpiceChunkId> {
+            self.chain.opening_chunks(id)
+        }
     }
 
     /// The producers of every item here; one per part.
@@ -550,7 +575,8 @@ mod manager {
     }
 
     /// A manager whose policy applies shard 1 only: of a block's four proofs it needs
-    /// `(0 -> 1)`, unless that proof is on disk. Nothing is finally executed until
+    /// `(0 -> 1)`, unless that proof is on disk. Nothing is certified until
+    /// `certify_up_to` says so, and nothing is finally executed until
     /// `set_final_execution_head` says so.
     struct TestManager {
         manager: SpiceDataManager<TestPolicy>,
@@ -581,6 +607,20 @@ mod manager {
                 failing_done_checks: HashSet::new(),
             };
             Self { manager: SpiceDataManager::new(0.6, store.chain_store(), policy), store }
+        }
+
+        /// Records a block certifying both shards' chunks of every canonical block up to
+        /// `height`, as tracking it would.
+        fn certify_up_to(&mut self, height: BlockHeight) {
+            let chain_store = self.store.chain_store();
+            let chunk_ids: Vec<SpiceChunkId> = (1..=height)
+                .filter_map(|height| chain_store.get_block_hash_by_height(height).ok())
+                .flat_map(|block_hash| {
+                    [0, 1].map(|shard| SpiceChunkId { block_hash, shard_id: ShardId::new(shard) })
+                })
+                .collect();
+            let head = chain_store.get_block(&chain_store.head().unwrap().last_block_hash).unwrap();
+            self.manager.open_certified(&certifying_block(&head, &chunk_ids)).unwrap();
         }
 
         /// Writes `block` to the store as the final execution head.
@@ -658,11 +698,12 @@ mod manager {
     }
 
     /// A manager tracking `blocks[0]`'s `(0 -> 1)` proof, its id, and `num_blocks` blocks.
+    /// Nothing is certified yet.
     fn tracked_item(num_blocks: usize) -> (Chain, Vec<Arc<Block>>, DataId, TestManager) {
         let (chain, blocks) = chain_with_blocks(num_blocks);
         let id = receipt_id(&blocks[0], 0, 1);
         let mut manager = TestManager::new(&chain);
-        manager.manager.track_block(blocks[0].header()).unwrap();
+        manager.manager.track_block(&blocks[0]).unwrap();
         (chain, blocks, id, manager)
     }
 
@@ -680,8 +721,8 @@ mod manager {
         let block = &blocks[4];
         let mut manager = TestManager::new(&chain).manager;
 
-        manager.track_block(block.header()).unwrap();
-        manager.track_block(block.header()).unwrap();
+        manager.track_block(&block).unwrap();
+        manager.track_block(&block).unwrap();
 
         assert!(manager.is_tracking(&receipt_id(block, 0, 1)));
         // Proofs from the shard we apply are produced locally; proofs into the shard we
@@ -702,7 +743,7 @@ mod manager {
         save_proof(&chain, block, &receipt_data(0, 1));
         let mut manager = TestManager::new(&chain).manager;
 
-        manager.track_block(block.header()).unwrap();
+        manager.track_block(&block).unwrap();
 
         assert!(!manager.is_tracking(&receipt_id(block, 0, 1)));
         assert!(manager.items_by_height.is_empty());
@@ -717,8 +758,8 @@ mod manager {
 
         // Height 1 is finally executed: neither the processed block nor a later track adds it.
         manager.on_block_processed(&blocks[0]);
-        manager.manager.track_block(blocks[0].header()).unwrap();
-        manager.manager.track_block(blocks[1].header()).unwrap();
+        manager.manager.track_block(&blocks[0]).unwrap();
+        manager.manager.track_block(&blocks[1]).unwrap();
 
         assert!(!manager.manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
         assert!(manager.manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
@@ -743,7 +784,7 @@ mod manager {
         let blocks = &all_blocks[1..];
         let mut manager = TestManager::new(&chain);
         for block in blocks {
-            manager.manager.track_block(block.header()).unwrap();
+            manager.manager.track_block(&block).unwrap();
         }
 
         manager.set_final_execution_head(&blocks[1]);
@@ -849,7 +890,7 @@ mod manager {
         let producer = producers()[0].clone();
         for bad_position in [0, DATA_PARTS / 2, DATA_PARTS] {
             let mut manager = TestManager::new(&chain);
-            manager.manager.track_block(blocks[0].header()).unwrap();
+            manager.manager.track_block(&blocks[0]).unwrap();
             let mut message = parts_with_ordinals(&parts, &good);
             let mut bad = parts_with_ordinals(&parts, &[DATA_PARTS as u64]).remove(0);
             bad.part[0] ^= 1;
@@ -883,7 +924,7 @@ mod manager {
         let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
         let mut manager = TestManager::new(&chain);
-        manager.manager.track_block(blocks[0].header()).unwrap();
+        manager.manager.track_block(&blocks[0]).unwrap();
         let mut bad = parts[0].clone();
         bad.part[0] ^= 1;
         let mut message = vec![bad];
@@ -906,7 +947,7 @@ mod manager {
         let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
         let mut manager = TestManager::new(&chain);
-        manager.manager.track_block(blocks[0].header()).unwrap();
+        manager.manager.track_block(&blocks[0]).unwrap();
         let good: Vec<u64> = (0..DATA_PARTS as u64).collect();
         let mut message = parts_with_ordinals(&parts, &good);
         message.insert(1, message[0].clone());
@@ -952,7 +993,7 @@ mod manager {
         let (commitment, _) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
         let mut manager = TestManager::new(&chain);
-        manager.manager.track_block(blocks[0].header()).unwrap();
+        manager.manager.track_block(&blocks[0]).unwrap();
         assert!(manager.manager.items.contains_key(&tracked));
         assert!(!manager.manager.items.contains_key(&untracked));
 
@@ -974,7 +1015,7 @@ mod manager {
             let (chain, canonical, [fork_at_3, fork_at_4]) = chain_with_forks();
             let mut manager = TestManager::new(&chain);
             for block in canonical.iter().chain([&fork_at_3, &fork_at_4]) {
-                manager.manager.track_block(block.header()).unwrap();
+                manager.manager.track_block(&block).unwrap();
             }
             let fork_ids = [receipt_id(&fork_at_3, 0, 1), receipt_id(&fork_at_4, 0, 1)];
 
@@ -990,6 +1031,40 @@ mod manager {
                 assert!(!manager.manager.is_tracking(id), "fork item stayed: {id:?}");
             }
             assert!(manager.manager.items_by_height.is_empty());
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_certified_chunk_opens_its_own_items_and_not_a_fork_sibling_at_the_same_height() {
+            let (chain, canonical, [_, fork_at_4]) = chain_with_forks();
+            let mut manager = TestManager::new(&chain);
+            manager.manager.track_block(&canonical[2]).unwrap();
+            manager.manager.track_block(&fork_at_4).unwrap();
+            let canonical_id = receipt_id(&canonical[2], 0, 1);
+            let fork_id = receipt_id(&fork_at_4, 0, 1);
+            let certified =
+                SpiceChunkId { block_hash: *canonical[2].hash(), shard_id: ShardId::new(0) };
+
+            manager.manager.track_block(&certifying_block(&canonical[2], &[certified])).unwrap();
+
+            assert!(manager.item(&canonical_id).is_pullable());
+            assert!(!manager.item(&fork_id).is_pullable());
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn certified_chunks_are_forgotten_at_the_final_execution_head() {
+            let (_chain, blocks, _id, mut manager) = tracked_item(3);
+            manager.certify_up_to(2);
+            assert_eq!(manager.manager.certified.len(), 4);
+
+            manager.set_final_execution_head(&blocks[0]);
+            manager.on_block_processed(&blocks[2]);
+            assert!(manager.manager.certified.values().all(|height| *height == 2));
+
+            manager.set_final_execution_head(&blocks[1]);
+            manager.on_block_processed(&blocks[2]);
+            assert!(manager.manager.certified.is_empty());
         }
 
         #[test]
@@ -1012,7 +1087,7 @@ mod manager {
             let (chain, blocks) = chain_with_blocks(3);
             let mut manager = TestManager::new(&chain);
             for block in &blocks {
-                manager.manager.track_block(block.header()).unwrap();
+                manager.manager.track_block(&block).unwrap();
             }
             let ids: Vec<DataId> = blocks.iter().map(|block| receipt_id(block, 0, 1)).collect();
 
@@ -1044,7 +1119,7 @@ mod manager {
             let failing = receipt_id(block, 1, 1);
             manager.manager.policies.failing_lookups.insert(failing.clone());
 
-            assert!(manager.manager.track_block(block.header()).is_err());
+            assert!(manager.manager.track_block(&block).is_err());
 
             assert!(!manager.manager.is_tracking(&resolvable));
             assert!(!manager.manager.is_tracking(&failing));
@@ -1060,7 +1135,7 @@ mod manager {
             let failing = receipt_id(block, 1, 1);
             manager.manager.policies.failing_done_checks.insert(failing.clone());
 
-            assert!(manager.manager.track_block(block.header()).is_err());
+            assert!(manager.manager.track_block(&block).is_err());
 
             assert!(!manager.manager.is_tracking(&resolvable));
             assert!(!manager.manager.is_tracking(&failing));
@@ -1071,7 +1146,7 @@ mod manager {
         fn a_failed_producer_lookup_on_the_processed_block_still_removes_the_done_items() {
             let (chain, blocks) = chain_with_blocks(2);
             let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
-            manager.manager.track_block(blocks[0].header()).unwrap();
+            manager.manager.track_block(&blocks[0]).unwrap();
             let older = receipt_id(&blocks[0], 0, 1);
             let failing = receipt_id(&blocks[1], 1, 1);
             manager.manager.policies.failing_lookups.insert(failing.clone());

@@ -739,7 +739,7 @@ impl SpiceDataDistributorActor {
         // Items may not be tracked yet if we received data after the block
         // became available but before we processed it.
         self.start_waiting_on_data(block.hash())?;
-        self.data_manager.track_block(block.header())?;
+        self.data_manager.track_block_items(block.header())?;
 
         match &id {
             SpiceDataIdentifier::ReceiptProof { block_hash, from_shard_id, to_shard_id } => {
@@ -1811,8 +1811,8 @@ impl SpiceDataDistributorActor {
             self.chain_store.get_all_next_block_hashes(&start_block).into();
         while let Some(block_hash) = next_block_hashes.pop_front() {
             self.start_waiting_on_data(&block_hash)?;
-            let header = self.chain_store.get_block_header(&block_hash)?;
-            self.data_manager.track_block(&header)?;
+            let block = self.chain_store.get_block(&block_hash)?;
+            self.data_manager.track_block(&block)?;
             next_block_hashes.extend(&self.chain_store.get_all_next_block_hashes(&block_hash));
         }
         Ok(())

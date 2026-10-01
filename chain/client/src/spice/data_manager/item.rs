@@ -9,7 +9,7 @@ use near_primitives::reed_solomon::{
 use near_primitives::sharding::ReceiptProof;
 use near_primitives::spice::partial_data::SpiceDataCommitment;
 use near_primitives::spice::state_witness::SpiceChunkStateWitness;
-use near_primitives::types::{AccountId, BlockHeight};
+use near_primitives::types::{AccountId, BlockHeight, SpiceChunkId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -33,6 +33,8 @@ pub(crate) struct FetchItem {
     /// Whether a decode has been handed to the consumer. Only then can the store hold the
     /// item's data.
     pub(crate) delivered: bool,
+    /// From `DataPolicy::opening_chunks`, less those a processed block has certified.
+    pub(super) uncertified_opening_chunks: HashSet<SpiceChunkId>,
     /// Tracks the state of commitments.
     pub(super) commitments: HashMap<SpiceDataCommitment, CommitmentState>,
 }
@@ -53,10 +55,27 @@ pub(super) enum CommitmentState {
 }
 
 impl FetchItem {
-    pub(crate) fn new(height: BlockHeight, producers: Vec<AccountId>) -> Self {
+    pub(crate) fn new(
+        height: BlockHeight,
+        producers: Vec<AccountId>,
+        opening_chunks: Vec<SpiceChunkId>,
+    ) -> Self {
         let producers =
             producers.into_iter().map(|producer| (producer, ProducerState::default())).collect();
-        Self { height, producers, delivered: false, commitments: HashMap::new() }
+        Self {
+            height,
+            producers,
+            delivered: false,
+            uncertified_opening_chunks: opening_chunks.into_iter().collect(),
+            commitments: HashMap::new(),
+        }
+    }
+
+    /// Whether every opening chunk is certified; only then is the item pulled.
+    // TODO(review-split): read by the pull in the next step.
+    #[allow(dead_code)]
+    pub(super) fn is_pullable(&self) -> bool {
+        self.uncertified_opening_chunks.is_empty()
     }
 
     /// Senders contributed to `commitment`.
