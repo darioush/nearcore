@@ -1850,7 +1850,9 @@ impl SpiceDataDistributorActor {
 /// Checks a request against the caps before any of it is served, so a request that asks for too
 /// much costs nothing beyond this pass. Ordinals are checked against the producer count when
 /// serving the entry, where that count is known.
-fn validate_wants(wants: &BTreeMap<SpiceDataIdentifier, BTreeSet<u64>>) -> Result<(), Error> {
+pub(crate) fn validate_wants(
+    wants: &BTreeMap<SpiceDataIdentifier, BTreeSet<u64>>,
+) -> Result<(), Error> {
     if wants.is_empty() {
         return Err(Error::MalformedRequest(MalformedDataRequest::NoEntries));
     }
