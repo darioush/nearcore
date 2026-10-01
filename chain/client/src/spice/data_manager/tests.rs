@@ -448,8 +448,8 @@ mod manager {
     use near_primitives::spice::partial_data::SpiceDataPart;
     use near_primitives::test_utils::{TestBlockBuilder, create_test_signer};
     use near_primitives::types::{BlockHeight, EpochId};
-    use near_store::ShardUId;
     use near_store::adapter::{StoreAdapter, StoreUpdateAdapter};
+    use near_store::{ShardUId, Store};
 
     /// A two-shard chain with `num_blocks` processed empty blocks; `blocks[i]` is at
     /// height `i + 1`.
@@ -550,75 +550,76 @@ mod manager {
     }
 
     /// A manager whose policy applies shard 1 only: of a block's four proofs it needs
-    /// `(0 -> 1)`, unless that proof is on disk, plus `extra_pairs`. Nothing is finally
-    /// executed until `set_final_execution_head` says so.
-    fn manager_with(chain: &Chain, extra_pairs: Vec<(u64, u64)>) -> SpiceDataManager<TestPolicy> {
-        let shard_layout = chain.epoch_manager.get_shard_layout(&EpochId::default()).unwrap();
-        let tracked = ShardUId::from_shard_id_and_layout(ShardId::new(1), &shard_layout);
-        let shard_tracker = ShardTracker::new(
-            TrackedShardsConfig::Shards(vec![tracked]),
-            chain.epoch_manager.clone(),
-            MutableConfigValue::new(None, "validator_signer"),
-        );
-        let chain_store = chain.chain_store.store().chain_store();
-        let policies =
-            Policies::new(chain_store.clone(), chain.epoch_manager.clone(), shard_tracker);
-        let policy = TestPolicy {
-            chain: policies,
-            producers: producers(),
-            extra_pairs,
-            failing_lookups: HashSet::new(),
-            failing_done_checks: HashSet::new(),
-        };
-        SpiceDataManager::new(0.6, chain_store, policy)
+    /// `(0 -> 1)`, unless that proof is on disk. Nothing is finally executed until
+    /// `set_final_execution_head` says so.
+    struct TestManager {
+        manager: SpiceDataManager<TestPolicy>,
+        store: Store,
     }
 
-    fn manager(chain: &Chain) -> SpiceDataManager<TestPolicy> {
-        manager_with(chain, Vec::new())
-    }
+    impl TestManager {
+        fn new(chain: &Chain) -> Self {
+            Self::with(chain, producers(), Vec::new())
+        }
 
-    fn state<'a>(
-        manager: &'a SpiceDataManager<TestPolicy>,
-        id: &DataId,
-        producer: &AccountId,
-    ) -> &'a ProducerState {
-        let item = manager.items.get(id).unwrap_or_else(|| panic!("no item for {id:?}"));
-        let (_, state) = item
-            .producers
-            .iter()
-            .find(|(account, _)| account == producer)
-            .unwrap_or_else(|| panic!("{producer} is not a producer of {id:?}"));
-        state
-    }
+        fn with(chain: &Chain, producers: Vec<AccountId>, extra_pairs: Vec<(u64, u64)>) -> Self {
+            let shard_layout = chain.epoch_manager.get_shard_layout(&EpochId::default()).unwrap();
+            let tracked = ShardUId::from_shard_id_and_layout(ShardId::new(1), &shard_layout);
+            let shard_tracker = ShardTracker::new(
+                TrackedShardsConfig::Shards(vec![tracked]),
+                chain.epoch_manager.clone(),
+                MutableConfigValue::new(None, "validator_signer"),
+            );
+            let store = chain.chain_store.store();
+            let policies =
+                Policies::new(store.chain_store(), chain.epoch_manager.clone(), shard_tracker);
+            let policy = TestPolicy {
+                chain: policies,
+                producers,
+                extra_pairs,
+                failing_lookups: HashSet::new(),
+                failing_done_checks: HashSet::new(),
+            };
+            Self { manager: SpiceDataManager::new(0.6, store.chain_store(), policy), store }
+        }
 
-    /// Writes `block` to the store as the final execution head.
-    fn set_final_execution_head(chain: &Chain, block: &Block) {
-        let mut store_update = chain.chain_store.store().store_update();
-        store_update
-            .chain_store_update()
-            .set_spice_final_execution_head(&Tip::from_header(block.header()));
-        store_update.commit();
-    }
+        /// Writes `block` to the store as the final execution head.
+        fn set_final_execution_head(&self, block: &Block) {
+            let mut store_update = self.store.store_update();
+            store_update
+                .chain_store_update()
+                .set_spice_final_execution_head(&Tip::from_header(block.header()));
+            store_update.commit();
+        }
 
-    fn save_proof(chain: &Chain, block: &Block, data: &SpiceData) {
-        let SpiceData::ReceiptProof(proof) = data else { panic!("not a receipt proof") };
-        let mut store_update = chain.chain_store.store().store_update();
-        save_receipt_proof(&mut store_update, block.hash(), proof);
-        store_update.commit();
-    }
+        fn on_block_processed(&mut self, block: &Block) {
+            self.manager.on_block_processed(block.hash())
+        }
 
-    /// Delivers enough parts of `data` from `sender` to decode `id`.
-    fn deliver(
-        manager: &mut SpiceDataManager<TestPolicy>,
-        sender: &AccountId,
-        id: &DataId,
-        data: &SpiceData,
-    ) {
-        let (commitment, mut parts) = encode_to_wire(&encoder(), data);
-        parts.truncate(DATA_PARTS);
-        let result =
-            manager.on_parts_received(sender, id, &commitment, parts, TOTAL_PARTS).unwrap();
-        assert_matches!(result, PartsOutcome::Decoded(decoded) if &decoded == data);
+        /// Delivers enough parts of `data` from `sender` to decode `id`.
+        fn deliver(&mut self, sender: &AccountId, id: &DataId, data: &SpiceData) {
+            let (commitment, mut parts) = encode_to_wire(&encoder(), data);
+            parts.truncate(DATA_PARTS);
+            let result = self
+                .manager
+                .on_parts_received(sender, id, &commitment, parts, TOTAL_PARTS)
+                .unwrap();
+            assert_matches!(result, PartsOutcome::Decoded(decoded) if &decoded == data);
+        }
+
+        fn item(&self, id: &DataId) -> &FetchItem {
+            self.manager.items.get(id).unwrap_or_else(|| panic!("no item for {id:?}"))
+        }
+
+        fn state(&self, id: &DataId, producer: &AccountId) -> &ProducerState {
+            let (_, state) = self
+                .item(id)
+                .producers
+                .iter()
+                .find(|(account, _)| account == producer)
+                .unwrap_or_else(|| panic!("{producer} is not a producer of {id:?}"));
+            state
+        }
     }
 
     fn receipt_id(block: &Block, from_shard: u64, to_shard: u64) -> DataId {
@@ -656,13 +657,20 @@ mod manager {
         parts.iter().filter(|part| ordinals.contains(&part.part_ord)).cloned().collect()
     }
 
-    /// A manager tracking `blocks[0]`'s `(0 -> 1)` proof, and its id.
-    fn tracked_item() -> (Chain, DataId, SpiceDataManager<TestPolicy>) {
-        let (chain, blocks) = chain_with_blocks(1);
+    /// A manager tracking `blocks[0]`'s `(0 -> 1)` proof, its id, and `num_blocks` blocks.
+    fn tracked_item(num_blocks: usize) -> (Chain, Vec<Arc<Block>>, DataId, TestManager) {
+        let (chain, blocks) = chain_with_blocks(num_blocks);
         let id = receipt_id(&blocks[0], 0, 1);
-        let mut manager = manager(&chain);
-        manager.track_block(blocks[0].header()).unwrap();
-        (chain, id, manager)
+        let mut manager = TestManager::new(&chain);
+        manager.manager.track_block(blocks[0].header()).unwrap();
+        (chain, blocks, id, manager)
+    }
+
+    fn save_proof(chain: &Chain, block: &Block, data: &SpiceData) {
+        let SpiceData::ReceiptProof(proof) = data else { panic!("not a receipt proof") };
+        let mut store_update = chain.chain_store.store().store_update();
+        save_receipt_proof(&mut store_update, block.hash(), proof);
+        store_update.commit();
     }
 
     #[test]
@@ -670,7 +678,7 @@ mod manager {
     fn track_block_tracks_exactly_the_needed_items_once() {
         let (chain, blocks) = chain_with_blocks(5);
         let block = &blocks[4];
-        let mut manager = manager(&chain);
+        let mut manager = TestManager::new(&chain).manager;
 
         manager.track_block(block.header()).unwrap();
         manager.track_block(block.header()).unwrap();
@@ -692,7 +700,7 @@ mod manager {
         let (chain, blocks) = chain_with_blocks(1);
         let block = &blocks[0];
         save_proof(&chain, block, &receipt_data(0, 1));
-        let mut manager = manager(&chain);
+        let mut manager = TestManager::new(&chain).manager;
 
         manager.track_block(block.header()).unwrap();
 
@@ -702,61 +710,29 @@ mod manager {
 
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn a_failed_producer_lookup_tracks_none_of_the_blocks_items() {
-        let (chain, blocks) = chain_with_blocks(1);
-        let block = &blocks[0];
-        let mut manager = manager_with(&chain, vec![(1, 1)]);
-        let resolvable = receipt_id(block, 0, 1);
-        let failing = receipt_id(block, 1, 1);
-        manager.policies.failing_lookups.insert(failing.clone());
-
-        assert!(manager.track_block(block.header()).is_err());
-
-        assert!(!manager.is_tracking(&resolvable));
-        assert!(!manager.is_tracking(&failing));
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn a_failed_done_check_tracks_none_of_the_blocks_items() {
-        let (chain, blocks) = chain_with_blocks(1);
-        let block = &blocks[0];
-        let mut manager = manager_with(&chain, vec![(1, 1)]);
-        let resolvable = receipt_id(block, 0, 1);
-        let failing = receipt_id(block, 1, 1);
-        manager.policies.failing_done_checks.insert(failing.clone());
-
-        assert!(manager.track_block(block.header()).is_err());
-
-        assert!(!manager.is_tracking(&resolvable));
-        assert!(!manager.is_tracking(&failing));
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn blocks_at_or_below_the_final_execution_head_are_not_tracked() {
         let (chain, blocks) = chain_with_blocks(2);
-        let mut manager = manager(&chain);
-        set_final_execution_head(&chain, &blocks[0]);
+        let mut manager = TestManager::new(&chain);
+        manager.set_final_execution_head(&blocks[0]);
 
         // Height 1 is finally executed: neither the processed block nor a later track adds it.
-        manager.on_block_processed(blocks[0].hash());
-        manager.track_block(blocks[0].header()).unwrap();
-        manager.track_block(blocks[1].header()).unwrap();
+        manager.on_block_processed(&blocks[0]);
+        manager.manager.track_block(blocks[0].header()).unwrap();
+        manager.manager.track_block(blocks[1].header()).unwrap();
 
-        assert!(!manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
-        assert!(manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
+        assert!(!manager.manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
+        assert!(manager.manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
     }
 
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn a_processed_block_tracks_its_items() {
         let (chain, blocks) = chain_with_blocks(1);
-        let mut manager = manager(&chain);
+        let mut manager = TestManager::new(&chain);
 
-        manager.on_block_processed(blocks[0].hash());
+        manager.on_block_processed(&blocks[0]);
 
-        assert!(manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
+        assert!(manager.manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
     }
 
     #[test]
@@ -765,105 +741,18 @@ mod manager {
         let (chain, all_blocks) = chain_with_blocks(4);
         // Heights 2, 3, 4.
         let blocks = &all_blocks[1..];
-        let mut manager = manager(&chain);
+        let mut manager = TestManager::new(&chain);
         for block in blocks {
-            manager.track_block(block.header()).unwrap();
+            manager.manager.track_block(block.header()).unwrap();
         }
 
-        set_final_execution_head(&chain, &blocks[1]);
-        manager.on_block_processed(blocks[2].hash());
+        manager.set_final_execution_head(&blocks[1]);
+        manager.on_block_processed(&blocks[2]);
 
-        assert!(!manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
-        assert!(!manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
-        assert!(manager.is_tracking(&receipt_id(&blocks[2], 0, 1)));
-        assert_eq!(manager.items_by_height.keys().copied().collect::<Vec<_>>(), vec![4]);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn a_fork_item_expires_by_height_with_the_final_execution_head() {
-        let (chain, canonical, [fork_at_3, fork_at_4]) = chain_with_forks();
-        let mut manager = manager(&chain);
-        for block in canonical.iter().chain([&fork_at_3, &fork_at_4]) {
-            manager.track_block(block.header()).unwrap();
-        }
-        let fork_ids = [receipt_id(&fork_at_3, 0, 1), receipt_id(&fork_at_4, 0, 1)];
-
-        set_final_execution_head(&chain, &canonical[1]);
-        manager.on_block_processed(canonical[2].hash());
-        for id in &fork_ids {
-            assert!(manager.is_tracking(id), "fork item expired early: {id:?}");
-        }
-
-        set_final_execution_head(&chain, &canonical[2]);
-        manager.on_block_processed(canonical[2].hash());
-        for id in &fork_ids {
-            assert!(!manager.is_tracking(id), "fork item stayed: {id:?}");
-        }
-        assert!(manager.items_by_height.is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn a_done_item_is_removed_at_the_processed_block() {
-        let (chain, blocks) = chain_with_blocks(1);
-        let id = receipt_id(&blocks[0], 0, 1);
-        let mut manager = manager(&chain);
-        manager.track_block(blocks[0].header()).unwrap();
-        deliver(&mut manager, &producers()[0], &id, &receipt_data(0, 1));
-        // The consumer saved the delivered data before the block was processed.
-        save_proof(&chain, &blocks[0], &receipt_data(0, 1));
-
-        manager.on_block_processed(blocks[0].hash());
-
-        assert!(!manager.is_tracking(&id));
-        assert!(manager.items_by_height.is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn an_item_is_removed_only_after_its_delivery_is_in_the_store() {
-        let (chain, blocks) = chain_with_blocks(3);
-        let mut manager = manager(&chain);
-        for block in &blocks {
-            manager.track_block(block.header()).unwrap();
-        }
-        let ids: Vec<DataId> = blocks.iter().map(|block| receipt_id(block, 0, 1)).collect();
-
-        // The proof is on disk but nothing delivered it: the item stays tracked.
-        save_proof(&chain, &blocks[0], &receipt_data(0, 1));
-        manager.on_block_processed(blocks[2].hash());
-        assert!(manager.is_tracking(&ids[0]));
-
-        // Delivered but not saved: the item stays tracked.
-        deliver(&mut manager, &producers()[0], &ids[1], &receipt_data(0, 1));
-        manager.on_block_processed(blocks[2].hash());
-        assert!(manager.is_tracking(&ids[1]));
-
-        // Delivered and saved: the next block removes it and leaves the others.
-        deliver(&mut manager, &producers()[0], &ids[0], &receipt_data(0, 1));
-        manager.on_block_processed(blocks[2].hash());
-        assert!(!manager.is_tracking(&ids[0]));
-        assert!(manager.is_tracking(&ids[1]));
-        assert!(manager.is_tracking(&ids[2]));
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
-    fn a_failed_producer_lookup_on_the_processed_block_still_removes_the_done_items() {
-        let (chain, blocks) = chain_with_blocks(2);
-        let mut manager = manager_with(&chain, vec![(1, 1)]);
-        manager.track_block(blocks[0].header()).unwrap();
-        let older = receipt_id(&blocks[0], 0, 1);
-        let failing = receipt_id(&blocks[1], 1, 1);
-        manager.policies.failing_lookups.insert(failing.clone());
-        deliver(&mut manager, &producers()[0], &older, &receipt_data(0, 1));
-        save_proof(&chain, &blocks[0], &receipt_data(0, 1));
-
-        manager.on_block_processed(blocks[1].hash());
-
-        assert!(!manager.is_tracking(&older));
-        assert!(!manager.is_tracking(&failing));
+        assert!(!manager.manager.is_tracking(&receipt_id(&blocks[0], 0, 1)));
+        assert!(!manager.manager.is_tracking(&receipt_id(&blocks[1], 0, 1)));
+        assert!(manager.manager.is_tracking(&receipt_id(&blocks[2], 0, 1)));
+        assert_eq!(manager.manager.items_by_height.keys().copied().collect::<Vec<_>>(), vec![4]);
     }
 
     #[test]
@@ -871,7 +760,7 @@ mod manager {
     fn parts_without_an_item_are_not_wanted() {
         let (chain, blocks) = chain_with_blocks(1);
         let id = receipt_id(&blocks[0], 0, 1);
-        let mut manager = manager(&chain);
+        let mut manager = TestManager::new(&chain).manager;
         let encoder = encoder();
         let (commitment, parts) = encode_to_wire(&encoder, &receipt_data(0, 1));
 
@@ -884,8 +773,8 @@ mod manager {
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn received_data_is_delivered_on_decode_and_its_commitment_settled() {
-        let (_chain, id, mut manager) = tracked_item();
-        let manager = &mut manager;
+        let (_chain, _blocks, id, mut manager) = tracked_item(1);
+        let manager = &mut manager.manager;
         let encoder = encoder();
         let (commitment, mut parts) = encode_to_wire(&encoder, &receipt_data(0, 1));
         let late_part = parts.split_off(DATA_PARTS);
@@ -906,8 +795,8 @@ mod manager {
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn a_second_commitment_for_a_delivered_id_is_delivered_too() {
-        let (_chain, id, mut manager) = tracked_item();
-        let manager = &mut manager;
+        let (_chain, _blocks, id, mut manager) = tracked_item(1);
+        let manager = &mut manager.manager;
         let encoder = encoder();
         let (first, first_parts) = encode_to_wire(&encoder, &receipt_data(0, 1));
         let (second, second_parts) = encode_to_wire(&encoder, &other_receipt_data(0, 1));
@@ -929,8 +818,8 @@ mod manager {
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn assembled_data_failing_its_id_check_is_settled_on_the_spot() {
-        let (_chain, id, mut manager) = tracked_item();
-        let manager = &mut manager;
+        let (_chain, _blocks, id, mut manager) = tracked_item(1);
+        let manager = &mut manager.manager;
         let encoder = encoder();
         // The decoded proof's destination doesn't match the id's `to_shard`.
         let (commitment, mut parts) = encode_to_wire(&encoder, &receipt_data(0, 0));
@@ -959,15 +848,20 @@ mod manager {
         let good: Vec<u64> = (0..DATA_PARTS as u64).collect();
         let producer = producers()[0].clone();
         for bad_position in [0, DATA_PARTS / 2, DATA_PARTS] {
-            let mut manager = manager(&chain);
-            manager.track_block(blocks[0].header()).unwrap();
+            let mut manager = TestManager::new(&chain);
+            manager.manager.track_block(blocks[0].header()).unwrap();
             let mut message = parts_with_ordinals(&parts, &good);
             let mut bad = parts_with_ordinals(&parts, &[DATA_PARTS as u64]).remove(0);
             bad.part[0] ^= 1;
             message.insert(bad_position, bad);
 
-            let result =
-                manager.on_parts_received(&producer, &id, &commitment, message, TOTAL_PARTS);
+            let result = manager.manager.on_parts_received(
+                &producer,
+                &id,
+                &commitment,
+                message,
+                TOTAL_PARTS,
+            );
 
             assert_matches!(
                 result,
@@ -976,8 +870,8 @@ mod manager {
             );
             // Enough good parts to decode were in the message; none landed and the sender
             // is not bound.
-            assert!(manager.items[&id].commitments.is_empty());
-            assert!(state(&manager, &id, &producer).commitment.is_none());
+            assert!(manager.item(&id).commitments.is_empty());
+            assert!(manager.state(&id, &producer).commitment.is_none());
         }
     }
 
@@ -988,19 +882,20 @@ mod manager {
         let id = receipt_id(&blocks[0], 0, 1);
         let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
-        let mut manager = manager(&chain);
-        manager.track_block(blocks[0].header()).unwrap();
+        let mut manager = TestManager::new(&chain);
+        manager.manager.track_block(blocks[0].header()).unwrap();
         let mut bad = parts[0].clone();
         bad.part[0] ^= 1;
         let mut message = vec![bad];
         message.extend(parts);
         assert_eq!(message.len(), TOTAL_PARTS + 1);
 
-        let result = manager.on_parts_received(&producer, &id, &commitment, message, TOTAL_PARTS);
+        let result =
+            manager.manager.on_parts_received(&producer, &id, &commitment, message, TOTAL_PARTS);
 
         assert_matches!(result, Err(SenderFault::TooManyParts));
-        assert!(manager.items[&id].commitments.is_empty());
-        assert!(state(&manager, &id, &producer).commitment.is_none());
+        assert!(manager.item(&id).commitments.is_empty());
+        assert!(manager.state(&id, &producer).commitment.is_none());
     }
 
     #[test]
@@ -1010,30 +905,31 @@ mod manager {
         let id = receipt_id(&blocks[0], 0, 1);
         let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
-        let mut manager = manager(&chain);
-        manager.track_block(blocks[0].header()).unwrap();
+        let mut manager = TestManager::new(&chain);
+        manager.manager.track_block(blocks[0].header()).unwrap();
         let good: Vec<u64> = (0..DATA_PARTS as u64).collect();
         let mut message = parts_with_ordinals(&parts, &good);
         message.insert(1, message[0].clone());
 
-        let result = manager.on_parts_received(&producer, &id, &commitment, message, TOTAL_PARTS);
+        let result =
+            manager.manager.on_parts_received(&producer, &id, &commitment, message, TOTAL_PARTS);
 
         // Enough distinct parts to decode were in the message; none landed and the sender is
         // not bound.
         assert_matches!(result, Err(SenderFault::DuplicateOrdinal));
-        assert!(manager.items[&id].commitments.is_empty());
-        assert!(state(&manager, &id, &producer).commitment.is_none());
+        assert!(manager.item(&id).commitments.is_empty());
+        assert!(manager.state(&id, &producer).commitment.is_none());
     }
 
     #[test]
     #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
     fn a_message_from_a_sender_that_is_not_a_producer_is_rejected_before_any_proof_check() {
-        let (_chain, id, mut manager) = tracked_item();
+        let (_chain, _blocks, id, mut manager) = tracked_item(1);
         let (commitment, parts) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let mut message = parts_with_ordinals(&parts, &[0, 1, 2]);
         message[0].part[0] ^= 1;
 
-        let result = manager.on_parts_received(
+        let result = manager.manager.on_parts_received(
             &account("stranger.near"),
             &id,
             &commitment,
@@ -1042,13 +938,9 @@ mod manager {
         );
 
         assert_matches!(result, Err(SenderFault::NotAProducer));
-        assert!(manager.items[&id].commitments.is_empty());
+        assert!(manager.item(&id).commitments.is_empty());
         // The item is untouched: a producer's parts still decode it.
-        let mut parts = parts;
-        parts.truncate(DATA_PARTS);
-        let result =
-            manager.on_parts_received(&producers()[0], &id, &commitment, parts, TOTAL_PARTS);
-        assert_matches!(result, Ok(PartsOutcome::Decoded(data)) if data == receipt_data(0, 1));
+        manager.deliver(&producers()[0], &id, &receipt_data(0, 1));
     }
 
     #[test]
@@ -1059,17 +951,138 @@ mod manager {
         let untracked = receipt_id(&blocks[0], 1, 0);
         let (commitment, _) = encode_to_wire(&encoder(), &receipt_data(0, 1));
         let producer = producers()[0].clone();
-        let mut manager = manager(&chain);
-        manager.track_block(blocks[0].header()).unwrap();
-        assert!(manager.items.contains_key(&tracked));
-        assert!(!manager.items.contains_key(&untracked));
+        let mut manager = TestManager::new(&chain);
+        manager.manager.track_block(blocks[0].header()).unwrap();
+        assert!(manager.manager.items.contains_key(&tracked));
+        assert!(!manager.manager.items.contains_key(&untracked));
 
         for id in [&tracked, &untracked] {
-            let result = manager.on_parts_received(&producer, id, &commitment, vec![], TOTAL_PARTS);
+            let result =
+                manager.manager.on_parts_received(&producer, id, &commitment, vec![], TOTAL_PARTS);
             assert_matches!(result, Err(SenderFault::EmptyMessage));
         }
-        assert!(manager.items[&tracked].commitments.is_empty());
-        assert!(state(&manager, &tracked, &producer).commitment.is_none());
+        assert!(manager.item(&tracked).commitments.is_empty());
+        assert!(manager.state(&tracked, &producer).commitment.is_none());
+    }
+
+    mod lifecycle {
+        use super::*;
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_fork_item_expires_by_height_with_the_final_execution_head() {
+            let (chain, canonical, [fork_at_3, fork_at_4]) = chain_with_forks();
+            let mut manager = TestManager::new(&chain);
+            for block in canonical.iter().chain([&fork_at_3, &fork_at_4]) {
+                manager.manager.track_block(block.header()).unwrap();
+            }
+            let fork_ids = [receipt_id(&fork_at_3, 0, 1), receipt_id(&fork_at_4, 0, 1)];
+
+            manager.set_final_execution_head(&canonical[1]);
+            manager.on_block_processed(&canonical[2]);
+            for id in &fork_ids {
+                assert!(manager.manager.is_tracking(id), "fork item expired early: {id:?}");
+            }
+
+            manager.set_final_execution_head(&canonical[2]);
+            manager.on_block_processed(&canonical[2]);
+            for id in &fork_ids {
+                assert!(!manager.manager.is_tracking(id), "fork item stayed: {id:?}");
+            }
+            assert!(manager.manager.items_by_height.is_empty());
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_done_item_is_removed_at_the_processed_block() {
+            let (chain, blocks, id, mut manager) = tracked_item(1);
+            manager.deliver(&producers()[0], &id, &receipt_data(0, 1));
+            // The consumer saved the delivered data before the block was processed.
+            save_proof(&chain, &blocks[0], &receipt_data(0, 1));
+
+            manager.on_block_processed(&blocks[0]);
+
+            assert!(!manager.manager.is_tracking(&id));
+            assert!(manager.manager.items_by_height.is_empty());
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn an_item_is_removed_only_after_its_delivery_is_in_the_store() {
+            let (chain, blocks) = chain_with_blocks(3);
+            let mut manager = TestManager::new(&chain);
+            for block in &blocks {
+                manager.manager.track_block(block.header()).unwrap();
+            }
+            let ids: Vec<DataId> = blocks.iter().map(|block| receipt_id(block, 0, 1)).collect();
+
+            // The proof is on disk but nothing delivered it: the item stays tracked.
+            save_proof(&chain, &blocks[0], &receipt_data(0, 1));
+            manager.on_block_processed(&blocks[2]);
+            assert!(manager.manager.is_tracking(&ids[0]));
+
+            // Delivered but not saved: the item stays tracked.
+            manager.deliver(&producers()[0], &ids[1], &receipt_data(0, 1));
+            manager.on_block_processed(&blocks[2]);
+            assert!(manager.manager.is_tracking(&ids[1]));
+
+            // Delivered and saved: the next block removes it and leaves the others.
+            manager.deliver(&producers()[0], &ids[0], &receipt_data(0, 1));
+            manager.on_block_processed(&blocks[2]);
+            assert!(!manager.manager.is_tracking(&ids[0]));
+            assert!(manager.manager.is_tracking(&ids[1]));
+            assert!(manager.manager.is_tracking(&ids[2]));
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_failed_producer_lookup_tracks_none_of_the_blocks_items() {
+            let (chain, blocks) = chain_with_blocks(1);
+            let block = &blocks[0];
+            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            let resolvable = receipt_id(block, 0, 1);
+            let failing = receipt_id(block, 1, 1);
+            manager.manager.policies.failing_lookups.insert(failing.clone());
+
+            assert!(manager.manager.track_block(block.header()).is_err());
+
+            assert!(!manager.manager.is_tracking(&resolvable));
+            assert!(!manager.manager.is_tracking(&failing));
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_failed_done_check_tracks_none_of_the_blocks_items() {
+            let (chain, blocks) = chain_with_blocks(1);
+            let block = &blocks[0];
+            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            let resolvable = receipt_id(block, 0, 1);
+            let failing = receipt_id(block, 1, 1);
+            manager.manager.policies.failing_done_checks.insert(failing.clone());
+
+            assert!(manager.manager.track_block(block.header()).is_err());
+
+            assert!(!manager.manager.is_tracking(&resolvable));
+            assert!(!manager.manager.is_tracking(&failing));
+        }
+
+        #[test]
+        #[cfg_attr(not(feature = "protocol_feature_spice"), ignore)]
+        fn a_failed_producer_lookup_on_the_processed_block_still_removes_the_done_items() {
+            let (chain, blocks) = chain_with_blocks(2);
+            let mut manager = TestManager::with(&chain, producers(), vec![(1, 1)]);
+            manager.manager.track_block(blocks[0].header()).unwrap();
+            let older = receipt_id(&blocks[0], 0, 1);
+            let failing = receipt_id(&blocks[1], 1, 1);
+            manager.manager.policies.failing_lookups.insert(failing.clone());
+            manager.deliver(&producers()[0], &older, &receipt_data(0, 1));
+            save_proof(&chain, &blocks[0], &receipt_data(0, 1));
+
+            manager.on_block_processed(&blocks[1]);
+
+            assert!(!manager.manager.is_tracking(&older));
+            assert!(!manager.manager.is_tracking(&failing));
+        }
     }
 }
 
@@ -1093,7 +1106,7 @@ mod pending {
                 encoded_length: 1,
             },
             parts,
-            sender: account("alice"),
+            sender: account("producer"),
         }
     }
 
