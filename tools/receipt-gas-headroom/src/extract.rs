@@ -1,9 +1,11 @@
 use crate::row::{
-    ChargedItem, ChildReceipt, ChunkRow, Producer, ProducerRow, attached_gas_is_derived,
+    AddedKeyPermission, ChargedItem, ChildReceipt, ChunkRow, CrossChecks, Producer, ProducerRow,
+    attached_gas_is_derived,
 };
 use anyhow::Context;
 use near_chain::{ChainStore, ChainStoreAccess};
 use near_parameters::{ActionCosts, RuntimeConfigStore};
+use near_primitives::account::AccessKeyPermission;
 use near_primitives::action::Action;
 use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::{Receipt, VersionedReceiptEnum};
@@ -21,18 +23,41 @@ fn method_names_bytes(method_names: &[String]) -> u64 {
 fn charged_item(action: &Action) -> ChargedItem {
     match action {
         Action::FunctionCall(call) => ChargedItem::FunctionCall {
+            method_name: call.method_name.clone(),
             payload_bytes: call.method_name.len() as u64 + call.args.len() as u64,
             attached_gas: call.gas,
         },
         Action::DeployContract(deploy) => {
             ChargedItem::DeployContract { code_bytes: deploy.code.len() as u64 }
         }
-        Action::AddKey(add_key) => match add_key.access_key.permission.function_call_permission() {
-            Some(permission) => ChargedItem::AddFunctionCallKey {
-                method_names_bytes: method_names_bytes(&permission.method_names),
-            },
-            None => ChargedItem::Other { kind: "AddFullAccessKey".to_owned() },
-        },
+        Action::AddKey(add_key) => {
+            let permission = &add_key.access_key.permission;
+            let kind = match permission {
+                AccessKeyPermission::FullAccess => AddedKeyPermission::FullAccess,
+                AccessKeyPermission::FunctionCall(_) => AddedKeyPermission::FunctionCall,
+                AccessKeyPermission::GasKeyFullAccess(_) => AddedKeyPermission::GasKeyFullAccess,
+                AccessKeyPermission::GasKeyFunctionCall(_, _) => {
+                    AddedKeyPermission::GasKeyFunctionCall
+                }
+            };
+            let function_call = permission.function_call_permission();
+            let gas_key_balance = match permission {
+                AccessKeyPermission::GasKeyFullAccess(info)
+                | AccessKeyPermission::GasKeyFunctionCall(info, _) => {
+                    Some(info.balance.as_yoctonear())
+                }
+                _ => None,
+            };
+            ChargedItem::AddKey {
+                permission: kind,
+                method_names_bytes: function_call
+                    .map_or(0, |permission| method_names_bytes(&permission.method_names)),
+                allowance: function_call.and_then(|permission| {
+                    permission.allowance.map(|amount| amount.as_yoctonear())
+                }),
+                gas_key_balance,
+            }
+        }
         Action::CreateAccount(_) => ChargedItem::Other { kind: "CreateAccount".to_owned() },
         Action::Transfer(_) => ChargedItem::Other { kind: "Transfer".to_owned() },
         Action::Stake(_) => ChargedItem::Other { kind: "Stake".to_owned() },
@@ -40,10 +65,12 @@ fn charged_item(action: &Action) -> ChargedItem {
         Action::DeleteAccount(_) => ChargedItem::Other { kind: "DeleteAccount".to_owned() },
         Action::Delegate(_) => ChargedItem::Other { kind: "Delegate".to_owned() },
         Action::DelegateV2(_) => ChargedItem::Other { kind: "DelegateV2".to_owned() },
-        Action::DeployGlobalContract(_) => {
-            ChargedItem::Other { kind: "DeployGlobalContract".to_owned() }
+        Action::DeployGlobalContract(deploy) => {
+            ChargedItem::DeployGlobalContract { code_bytes: deploy.code.len() as u64 }
         }
-        Action::UseGlobalContract(_) => ChargedItem::Other { kind: "UseGlobalContract".to_owned() },
+        Action::UseGlobalContract(use_global) => ChargedItem::UseGlobalContract {
+            identifier_bytes: use_global.contract_identifier.len() as u64,
+        },
         Action::DeterministicStateInit(_) => {
             ChargedItem::Other { kind: "DeterministicStateInit".to_owned() }
         }
@@ -109,6 +136,8 @@ fn extract_chunk(
     transactions_in_chunk: u64,
     transaction_signers: &HashMap<CryptoHash, AccountId>,
     configs: &RuntimeConfigStore,
+    gas_used_from_next_header: Option<Gas>,
+    checks: &mut CrossChecks,
     out: &mut impl Write,
     chunk_out: &mut impl Write,
 ) -> anyhow::Result<usize> {
@@ -122,6 +151,7 @@ fn extract_chunk(
     let produced_by_id: HashMap<CryptoHash, &Receipt> =
         produced.iter().map(|receipt| (*receipt.receipt_id(), receipt)).collect();
 
+    let mut claimed: HashMap<CryptoHash, u32> = HashMap::new();
     let mut chunk_row = ChunkRow {
         block_height,
         shard_id,
@@ -153,6 +183,11 @@ fn extract_chunk(
         chunk_row.gas_burnt = chunk_row.gas_burnt.saturating_add(outcome.gas_burnt);
         chunk_row.compute_usage += outcome.compute_usage.unwrap_or_default();
 
+        for receipt_id in &outcome.receipt_ids {
+            if produced_by_id.contains_key(receipt_id) {
+                *claimed.entry(*receipt_id).or_default() += 1;
+            }
+        }
         let children: Vec<ChildReceipt> = outcome
             .receipt_ids
             .iter()
@@ -204,6 +239,12 @@ fn extract_chunk(
                     .iter()
                     .filter(|child| !child.attached_gas_is_derived)
                     .fold(Gas::ZERO, |total, child| total.saturating_add(child.attached_gas));
+                let shortfall = i128::from(prepaid_gas.as_gas())
+                    - i128::from(outcome.gas_burnt.as_gas())
+                    - i128::from(constant_children_gas.as_gas());
+                if shortfall < 0 {
+                    checks.receipts_with_negative_gas_left += 1;
+                }
                 let gas_left = prepaid_gas
                     .saturating_sub(outcome.gas_burnt)
                     .saturating_sub(constant_children_gas);
@@ -233,6 +274,22 @@ fn extract_chunk(
         out.write_all(b"\n")?;
         rows_written += 1;
     }
+    checks.chunks_checked += 1;
+    checks.receipts_created += chunk_row.action_receipts_created + chunk_row.data_receipts_created;
+    checks.receipts_processed += chunk_row.receipts_processed;
+    checks.unclaimed_receipts +=
+        produced.iter().filter(|r| !claimed.contains_key(r.receipt_id())).count() as u64;
+    checks.doubly_claimed_receipts += claimed.values().filter(|count| **count > 1).count() as u64;
+    if let Some(recorded) = gas_used_from_next_header {
+        let difference = i128::from(chunk_row.gas_burnt.as_gas()) - i128::from(recorded.as_gas());
+        if difference != 0 {
+            checks.chunks_with_gas_mismatch += 1;
+            if difference.abs() > checks.worst_gas_mismatch.abs() {
+                checks.worst_gas_mismatch = difference;
+            }
+        }
+    }
+
     serde_json::to_writer(&mut *chunk_out, &chunk_row)?;
     chunk_out.write_all(b"\n")?;
     Ok(rows_written)
@@ -244,13 +301,27 @@ pub fn extract_range(
     end_height: BlockHeight,
     out: &mut impl Write,
     chunk_out: &mut impl Write,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<(usize, CrossChecks)> {
     let configs = RuntimeConfigStore::new();
+    let mut checks = CrossChecks::default();
     let mut total_rows = 0;
     for height in start_height..=end_height {
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
         let Ok(block) = chain_store.get_block(&block_hash) else { continue };
         let protocol_version = block.header().latest_protocol_version();
+
+        // A chunk header records `prev_gas_used`, the gas the previous block's
+        // chunk for that shard used, so the next block holds the runtime's own
+        // figure for the chunk being read here.
+        let mut gas_used_per_shard = HashMap::new();
+        if let Ok(next_hash) = chain_store.get_block_hash_by_height(height + 1) {
+            if let Ok(next_block) = chain_store.get_block(&next_hash) {
+                for chunk_header in next_block.chunks().iter_raw() {
+                    gas_used_per_shard
+                        .insert(chunk_header.shard_id(), chunk_header.prev_gas_used());
+                }
+            }
+        }
 
         let mut transaction_signers = HashMap::new();
         let mut transactions_per_shard = HashMap::new();
@@ -275,10 +346,12 @@ pub fn extract_range(
                 transactions_per_shard.get(&shard_id).copied().unwrap_or_default(),
                 &transaction_signers,
                 &configs,
+                gas_used_per_shard.get(&shard_id).copied(),
+                &mut checks,
                 out,
                 chunk_out,
             )?;
         }
     }
-    Ok(total_rows)
+    Ok((total_rows, checks))
 }

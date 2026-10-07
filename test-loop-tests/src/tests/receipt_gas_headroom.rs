@@ -93,8 +93,16 @@ fn extract_records_self_calls_and_tells_fixed_gas_from_derived() {
 
     let mut rows_out = Vec::new();
     let mut chunk_out = Vec::new();
-    let rows_written =
+    let (rows_written, checks) =
         extract_range(&chain_store, 1, head_height, &mut rows_out, &mut chunk_out).unwrap();
+
+    // The accounting checks itself against figures the runtime recorded
+    // separately, so a store the runtime built is where they have to hold.
+    assert_eq!(checks.chunks_with_gas_mismatch, 0, "summed outcome gas disagreed with the header");
+    assert_eq!(checks.unclaimed_receipts, 0, "a produced receipt had no producer");
+    assert_eq!(checks.doubly_claimed_receipts, 0, "a receipt was claimed twice");
+    assert_eq!(checks.receipts_with_negative_gas_left, 0, "a receipt burned more than it had");
+    assert!(checks.chunks_checked > 0);
 
     let rows = parse_rows(&rows_out);
     let chunk_rows = parse_chunk_rows(&chunk_out);

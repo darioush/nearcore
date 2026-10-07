@@ -19,14 +19,31 @@ pub enum Producer {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ChargedItem {
     /// Charged per byte of `method_name` plus `args`, and once per action.
-    FunctionCall { payload_bytes: u64, attached_gas: Gas },
+    /// The name is kept so the census can say which method a call was to, not
+    /// just which contract.
+    FunctionCall { method_name: String, payload_bytes: u64, attached_gas: Gas },
     /// Charged per byte of contract code.
     DeployContract { code_bytes: u64 },
-    /// Charged once per action, plus per byte of the null terminated method names.
-    AddFunctionCallKey { method_names_bytes: u64 },
+    /// An added access key. The permission decides which fee applies:
+    /// `add_full_access_key` has no per-byte part, while the function call
+    /// forms are charged per byte of the null terminated method names.
+    AddKey {
+        permission: AddedKeyPermission,
+        method_names_bytes: u64,
+        /// Spending limit on a function call key, in yoctoNEAR. `None` is
+        /// unlimited, and full access keys have no allowance at all.
+        allowance: Option<u128>,
+        /// Prepaid balance a gas key carries, in yoctoNEAR.
+        gas_key_balance: Option<u128>,
+    },
     /// Bytes of a value a contract returned, charged per output data receiver
     /// by `new_data_receipt_byte`.
     ReturnedData { payload_bytes: u64 },
+    /// Charged per byte of the global contract code being published.
+    DeployGlobalContract { code_bytes: u64 },
+    /// Charged per byte of the identifier, which is a 32 byte code hash or an
+    /// account id, so it is far smaller than the code it names.
+    UseGlobalContract { identifier_bytes: u64 },
     /// Every other action kind, kept so the census covers all of them.
     Other { kind: String },
 }
@@ -72,6 +89,24 @@ pub struct ProducerRow {
 /// Attached gas at or below this granularity is treated as a hardcoded
 /// constant. Contracts write round numbers; gas computed from a leftover
 /// almost never lands on one.
+/// Which of the four `AccessKeyPermission` forms a key was added with. Only
+/// the function call forms pay `add_function_call_key_byte`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddedKeyPermission {
+    FullAccess,
+    FunctionCall,
+    GasKeyFullAccess,
+    GasKeyFunctionCall,
+}
+
+impl AddedKeyPermission {
+    /// True for the two forms charged `add_function_call_key_base` and
+    /// `add_function_call_key_byte`.
+    pub fn is_function_call(&self) -> bool {
+        matches!(self, Self::FunctionCall | Self::GasKeyFunctionCall)
+    }
+}
+
 pub const CONSTANT_ATTACHED_GAS_GRANULARITY: u64 = 100_000_000_000;
 
 pub fn attached_gas_is_derived(attached_gas: Gas) -> bool {
@@ -97,4 +132,29 @@ pub struct ChunkRow {
     /// Summed from the outcomes. `None` on outcomes written before compute
     /// costs were recorded, which are counted as zero.
     pub compute_usage: u64,
+}
+
+/// Totals the extractor can check against a figure the runtime recorded
+/// independently, so a run says whether its own accounting held.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CrossChecks {
+    pub chunks_checked: u64,
+    /// Chunks where the summed `gas_burnt` of the outcomes did not equal the
+    /// `prev_gas_used` the next block's chunk header recorded. Any mismatch
+    /// means outcomes were missed, which silently drops producers.
+    pub chunks_with_gas_mismatch: u64,
+    pub worst_gas_mismatch: i128,
+    /// Receipts a chunk produced that no outcome in that chunk claimed as a
+    /// child, which would mean the join missed a producer.
+    pub unclaimed_receipts: u64,
+    /// Receipts claimed by more than one producer, which cannot happen.
+    pub doubly_claimed_receipts: u64,
+    /// Compared globally over a range: these differ only by what is in flight
+    /// at the two edges, which does not grow as the range gets longer.
+    pub receipts_created: u64,
+    pub receipts_processed: u64,
+    /// Receipts whose prepaid gas did not cover what they burned plus what they
+    /// committed to constant children. A nonzero count is a modelling error,
+    /// the shape the missing execution fees had.
+    pub receipts_with_negative_gas_left: u64,
 }

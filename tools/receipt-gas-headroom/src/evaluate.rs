@@ -14,18 +14,18 @@ pub enum Analysis {
     /// `deploy_contract_cost_per_byte`.
     SendSirCallAndDeploy,
     /// Raise `send_sir` to `send_not_sir` on every per-byte fee that still has
-    /// the two differing, which also covers `add_key` per byte and
-    /// `data_receipt_creation` per byte.
+    /// the two differing: the two above plus `add_key` per byte,
+    /// `data_receipt_creation` per byte, and both global contract fees.
     SendSirAllPerByte,
-    /// Raise the `add_function_call_key` execution fee so the existing
+    /// Raise the execution fee of every added key so the existing
     /// `min_gas_purchase_price` skim collects `account_creation_charge`.
-    AddFunctionCallKeyExecution,
+    AddKeyExecution,
 }
 
-/// The `add_function_call_key` execution fee that makes the skim reach
-/// 7 mNEAR at `min_gas_purchase_price`, sized the way `create_account` was:
+/// The execution fee that makes the skim reach 7 mNEAR at
+/// `min_gas_purchase_price`, sized the way `create_account` was:
 /// `min_gas_purchase_price * exec_fee >= account_creation_charge`.
-pub const ADD_FUNCTION_CALL_KEY_EXECUTION_TARGET: Gas = Gas::from_gas(7_200_000_000_000);
+pub const ADDED_KEY_EXECUTION_TARGET: Gas = Gas::from_gas(7_200_000_000_000);
 
 /// How much more a producer burns for one charged item under the candidate change.
 fn extra_gas(
@@ -42,7 +42,7 @@ fn extra_gas(
     };
     match (analysis, item) {
         // The `send_sir` rises only apply where the producer sent to itself.
-        (_, _) if analysis != Analysis::AddFunctionCallKeyExecution && !is_self_call => Gas::ZERO,
+        (_, _) if analysis != Analysis::AddKeyExecution && !is_self_call => Gas::ZERO,
 
         (
             Analysis::SendSirCallAndDeploy | Analysis::SendSirAllPerByte,
@@ -58,7 +58,12 @@ fn extra_gas(
             send_sir_rise_to_not_sir(ActionCosts::deploy_contract_byte).saturating_mul(*code_bytes)
         }
 
-        (Analysis::SendSirAllPerByte, ChargedItem::AddFunctionCallKey { method_names_bytes }) => {
+        // Only the function call forms pay `add_function_call_key_*`. A full
+        // access key pays `add_full_access_key`, whose send fees do not differ.
+        (
+            Analysis::SendSirAllPerByte,
+            ChargedItem::AddKey { permission, method_names_bytes, .. },
+        ) if permission.is_function_call() => {
             send_sir_rise_to_not_sir(ActionCosts::add_function_call_key_byte)
                 .saturating_mul(*method_names_bytes)
         }
@@ -68,10 +73,27 @@ fn extra_gas(
                 .saturating_mul(*payload_bytes)
         }
 
+        (Analysis::SendSirAllPerByte, ChargedItem::DeployGlobalContract { code_bytes }) => {
+            send_sir_rise_to_not_sir(ActionCosts::deploy_global_contract_byte)
+                .saturating_mul(*code_bytes)
+        }
+
+        (Analysis::SendSirAllPerByte, ChargedItem::UseGlobalContract { identifier_bytes }) => {
+            send_sir_rise_to_not_sir(ActionCosts::use_global_contract_byte)
+                .saturating_mul(*identifier_bytes)
+        }
+
         // Charged on every key, whoever the receiver is, so no `is_self_call` test.
-        (Analysis::AddFunctionCallKeyExecution, ChargedItem::AddFunctionCallKey { .. }) => {
-            ADD_FUNCTION_CALL_KEY_EXECUTION_TARGET
-                .saturating_sub(fees.fee(ActionCosts::add_function_call_key_base).exec_fee().gas)
+        // Pricing a key at `account_creation_charge` is about the state it
+        // leaves behind, not about who the receiver is, so every added key
+        // counts, full access ones included.
+        (Analysis::AddKeyExecution, ChargedItem::AddKey { permission, .. }) => {
+            let base = if permission.is_function_call() {
+                ActionCosts::add_function_call_key_base
+            } else {
+                ActionCosts::add_full_access_key
+            };
+            ADDED_KEY_EXECUTION_TARGET.saturating_sub(fees.fee(base).exec_fee().gas)
         }
 
         _ => Gas::ZERO,
@@ -208,7 +230,11 @@ mod tests {
             attached_gas: tgas(5),
             is_self_call: true,
             attached_gas_is_derived: false,
-            items: vec![ChargedItem::FunctionCall { payload_bytes, attached_gas: tgas(5) }],
+            items: vec![ChargedItem::FunctionCall {
+                method_name: "callback".to_owned(),
+                payload_bytes,
+                attached_gas: tgas(5),
+            }],
         }
     }
 
@@ -278,10 +304,15 @@ mod tests {
         let scant_gas_left = tgas(1);
         let mut child = self_call_with_payload(0);
         child.is_self_call = false;
-        child.items = vec![ChargedItem::AddFunctionCallKey { method_names_bytes: 0 }];
+        child.items = vec![ChargedItem::AddKey {
+            permission: crate::row::AddedKeyPermission::FunctionCall,
+            method_names_bytes: 0,
+            allowance: None,
+            gas_key_balance: None,
+        }];
         let report = run(
             vec![receipt_producer(scant_gas_left, vec![child])],
-            Analysis::AddFunctionCallKeyExecution,
+            Analysis::AddKeyExecution,
             InheritedLoss::None,
         );
         assert_eq!(report.failures.len(), 1);

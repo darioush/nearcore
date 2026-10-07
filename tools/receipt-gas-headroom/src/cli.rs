@@ -107,7 +107,7 @@ impl ExtractCmd {
             Some(path) => Box::new(BufWriter::new(std::fs::File::create(path)?)),
             None => Box::new(std::io::sink()),
         };
-        let rows = extract_range(
+        let (rows, checks) = extract_range(
             &chain_store,
             self.start_height,
             self.end_height,
@@ -115,6 +115,7 @@ impl ExtractCmd {
             &mut chunk_out,
         )?;
         tracing::info!(target: "receipt-gas-headroom", rows, "extract finished");
+        eprintln!("{}", serde_json::to_string_pretty(&checks)?);
         Ok(())
     }
 }
