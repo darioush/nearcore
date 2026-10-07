@@ -7732,6 +7732,7 @@ dependencies = [
  "near-parameters",
  "near-primitives",
  "near-primitives-core",
+ "near-receipt-gas-headroom-tool",
  "near-replay",
  "near-store",
  "near-test-contracts",

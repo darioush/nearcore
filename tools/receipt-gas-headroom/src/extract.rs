@@ -3,6 +3,7 @@ use crate::row::{
 };
 use anyhow::Context;
 use near_chain::{ChainStore, ChainStoreAccess};
+use near_parameters::{ActionCosts, RuntimeConfigStore};
 use near_primitives::action::Action;
 use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::{Receipt, VersionedReceiptEnum};
@@ -107,6 +108,7 @@ fn extract_chunk(
     protocol_version: ProtocolVersion,
     transactions_in_chunk: u64,
     transaction_signers: &HashMap<CryptoHash, AccountId>,
+    configs: &RuntimeConfigStore,
     out: &mut impl Write,
     chunk_out: &mut impl Write,
 ) -> anyhow::Result<usize> {
@@ -178,8 +180,26 @@ fn extract_chunk(
                 else {
                     continue;
                 };
-                let prepaid_gas = node_runtime::config::total_prepaid_gas(action_receipt.actions())
-                    .context("prepaid gas overflow")?;
+                // A receipt's budget is the gas attached to its function calls
+                // plus the execution fees bought for it, the same sum
+                // `refund_unspent_gas_and_deposits` refunds against. Leaving
+                // the fees out makes a refund receipt, whose actions attach no
+                // gas at all, look like it burned more than it had.
+                let config = configs.get_config(protocol_version);
+                let attached_gas =
+                    node_runtime::config::total_prepaid_gas(action_receipt.actions())
+                        .context("prepaid gas overflow")?;
+                let exec_fees = node_runtime::config::total_prepaid_exec_fees(
+                    config,
+                    action_receipt.actions(),
+                    receipt.receiver_id(),
+                )
+                .context("prepaid exec fee overflow")?
+                .gas
+                .checked_add(config.fees.fee(ActionCosts::new_action_receipt).exec_fee().gas)
+                .context("prepaid exec fee overflow")?;
+                let prepaid_gas =
+                    attached_gas.checked_add(exec_fees).context("prepaid gas overflow")?;
                 let constant_children_gas = children
                     .iter()
                     .filter(|child| !child.attached_gas_is_derived)
@@ -225,6 +245,7 @@ pub fn extract_range(
     out: &mut impl Write,
     chunk_out: &mut impl Write,
 ) -> anyhow::Result<usize> {
+    let configs = RuntimeConfigStore::new();
     let mut total_rows = 0;
     for height in start_height..=end_height {
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
@@ -253,6 +274,7 @@ pub fn extract_range(
                 protocol_version,
                 transactions_per_shard.get(&shard_id).copied().unwrap_or_default(),
                 &transaction_signers,
+                &configs,
                 out,
                 chunk_out,
             )?;

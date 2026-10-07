@@ -1,6 +1,6 @@
 mod cli;
 mod evaluate;
-mod extract;
+pub mod extract;
 mod row;
 
 pub use cli::ReceiptGasHeadroomCommand;
