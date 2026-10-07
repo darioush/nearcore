@@ -1,6 +1,7 @@
+use crate::frame::FrameWriter;
 use crate::row::{
-    AddedKeyPermission, ChargedItem, ChildReceipt, ChunkRow, CrossChecks, Producer, ProducerRow,
-    attached_gas_is_derived,
+    AddedKeyPermission, Census, ChargedItem, ChildReceipt, ChunkRow, CrossChecks, Producer,
+    ProducerRow, attached_gas_is_derived,
 };
 use anyhow::Context;
 use near_chain::{ChainStore, ChainStoreAccess};
@@ -84,6 +85,35 @@ fn charged_item(action: &Action) -> ChargedItem {
     }
 }
 
+fn record_item(item: &ChargedItem, census: &mut Census) {
+    let kind = match item {
+        ChargedItem::FunctionCall { payload_bytes, .. } => {
+            census.function_call_payload_bytes.record(*payload_bytes);
+            "FunctionCall"
+        }
+        ChargedItem::DeployContract { code_bytes } => {
+            census.deploy_contract_code_bytes.record(*code_bytes);
+            "DeployContract"
+        }
+        ChargedItem::DeployGlobalContract { code_bytes } => {
+            census.deploy_global_contract_code_bytes.record(*code_bytes);
+            "DeployGlobalContract"
+        }
+        ChargedItem::UseGlobalContract { .. } => "UseGlobalContract",
+        ChargedItem::ReturnedData { payload_bytes } => {
+            census.returned_data_payload_bytes.record(*payload_bytes);
+            "ReturnedData"
+        }
+        ChargedItem::AddKey { permission, method_names_bytes, .. } => {
+            census.added_key_method_names_bytes.record(*method_names_bytes);
+            *census.added_keys_by_permission.entry(format!("{permission:?}")).or_default() += 1;
+            "AddKey"
+        }
+        ChargedItem::Other { kind } => kind.as_str(),
+    };
+    *census.items_by_kind.entry(kind.to_owned()).or_default() += 1;
+}
+
 fn child_receipt(receipt: &Receipt) -> Option<ChildReceipt> {
     let (attached_gas, items) = match receipt.versioned_receipt() {
         VersionedReceiptEnum::Action(action_receipt)
@@ -138,8 +168,9 @@ fn extract_chunk(
     configs: &RuntimeConfigStore,
     gas_used_from_next_header: Option<Gas>,
     checks: &mut CrossChecks,
-    out: &mut impl Write,
-    chunk_out: &mut impl Write,
+    census: &mut Census,
+    out: &mut FrameWriter<impl Write>,
+    chunk_out: &mut FrameWriter<impl Write>,
 ) -> anyhow::Result<usize> {
     let produced = match chain_store.get_outgoing_receipts(block_hash, shard_id) {
         Ok(receipts) => receipts,
@@ -194,6 +225,20 @@ fn extract_chunk(
             .filter_map(|receipt_id| produced_by_id.get(receipt_id))
             .filter_map(|receipt| child_receipt(receipt))
             .collect();
+        census.children_per_producer.record(children.len() as u64);
+        for child in &children {
+            if child.is_self_call {
+                census.self_call_children += 1;
+            }
+            if child.attached_gas_is_derived {
+                census.derived_gas_children += 1;
+            }
+            census.attached_gas.record(child.attached_gas.as_gas());
+            census.actions_per_receipt.record(child.items.len() as u64);
+            for item in &child.items {
+                record_item(item, census);
+            }
+        }
 
         // An outcome id is either a transaction hash or a receipt id. The
         // transactions of this chunk are the only transaction hashes that can
@@ -245,6 +290,9 @@ fn extract_chunk(
                 if shortfall < 0 {
                     checks.receipts_with_negative_gas_left += 1;
                 }
+                census
+                    .gas_left_after_constant_children
+                    .record(shortfall.max(0).try_into().unwrap_or(u64::MAX));
                 let gas_left = prepaid_gas
                     .saturating_sub(outcome.gas_burnt)
                     .saturating_sub(constant_children_gas);
@@ -270,8 +318,7 @@ fn extract_chunk(
             gas_left_after_constant_children: gas_left,
             children,
         };
-        serde_json::to_writer(&mut *out, &row)?;
-        out.write_all(b"\n")?;
+        out.write(&row)?;
         rows_written += 1;
     }
     checks.chunks_checked += 1;
@@ -290,8 +337,7 @@ fn extract_chunk(
         }
     }
 
-    serde_json::to_writer(&mut *chunk_out, &chunk_row)?;
-    chunk_out.write_all(b"\n")?;
+    chunk_out.write(&chunk_row)?;
     Ok(rows_written)
 }
 
@@ -299,11 +345,12 @@ pub fn extract_range(
     chain_store: &ChainStore,
     start_height: BlockHeight,
     end_height: BlockHeight,
-    out: &mut impl Write,
-    chunk_out: &mut impl Write,
-) -> anyhow::Result<(usize, CrossChecks)> {
+    out: &mut FrameWriter<impl Write>,
+    chunk_out: &mut FrameWriter<impl Write>,
+) -> anyhow::Result<(usize, CrossChecks, Census)> {
     let configs = RuntimeConfigStore::new();
     let mut checks = CrossChecks::default();
+    let mut census = Census::default();
     let mut total_rows = 0;
     for height in start_height..=end_height {
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
@@ -348,10 +395,11 @@ pub fn extract_range(
                 &configs,
                 gas_used_per_shard.get(&shard_id).copied(),
                 &mut checks,
+                &mut census,
                 out,
                 chunk_out,
             )?;
         }
     }
-    Ok((total_rows, checks))
+    Ok((total_rows, checks, census))
 }

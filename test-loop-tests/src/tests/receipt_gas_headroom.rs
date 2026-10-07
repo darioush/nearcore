@@ -5,25 +5,18 @@ use near_chain::ChainStore;
 use near_o11y::testonly::init_test_logger;
 use near_primitives::types::{AccountId, Balance, Gas};
 use near_receipt_gas_headroom_tool::extract::extract_range;
+use near_receipt_gas_headroom_tool::frame::{FrameReader, FrameWriter};
 use near_receipt_gas_headroom_tool::{ChargedItem, ChunkRow, Producer, ProducerRow};
 use std::collections::HashSet;
 
-/// Reads back the rows `extract` wrote, so the assertions see the same JSON
-/// lines a real run produces rather than an in-memory shortcut.
+/// Reads back what `extract` wrote, through the same frame format a real run
+/// produces, rather than an in-memory shortcut.
 fn parse_rows(bytes: &[u8]) -> Vec<ProducerRow> {
-    std::str::from_utf8(bytes)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    FrameReader::new(bytes).collect()
 }
 
 fn parse_chunk_rows(bytes: &[u8]) -> Vec<ChunkRow> {
-    std::str::from_utf8(bytes)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    FrameReader::new(bytes).collect()
 }
 
 /// Asks the contract to call itself with a fixed gas amount, the shape a
@@ -91,10 +84,14 @@ fn extract_records_self_calls_and_tells_fixed_gas_from_derived() {
     let head_height = node.head().height;
     let chain_store = ChainStore::new(node.store(), true, 1000);
 
-    let mut rows_out = Vec::new();
-    let mut chunk_out = Vec::new();
-    let (rows_written, checks) =
+    let mut rows_bytes = Vec::new();
+    let mut chunk_bytes = Vec::new();
+    let mut rows_out = FrameWriter::new(&mut rows_bytes, 64);
+    let mut chunk_out = FrameWriter::new(&mut chunk_bytes, 64);
+    let (rows_written, checks, census) =
         extract_range(&chain_store, 1, head_height, &mut rows_out, &mut chunk_out).unwrap();
+    rows_out.finish().unwrap();
+    chunk_out.finish().unwrap();
 
     // The accounting checks itself against figures the runtime recorded
     // separately, so a store the runtime built is where they have to hold.
@@ -103,9 +100,12 @@ fn extract_records_self_calls_and_tells_fixed_gas_from_derived() {
     assert_eq!(checks.doubly_claimed_receipts, 0, "a receipt was claimed twice");
     assert_eq!(checks.receipts_with_negative_gas_left, 0, "a receipt burned more than it had");
     assert!(checks.chunks_checked > 0);
+    assert!(census.function_call_payload_bytes.count > 0, "payload sizes should be summarised");
+    assert!(census.self_call_children > 0);
+    assert!(census.derived_gas_children > 0);
 
-    let rows = parse_rows(&rows_out);
-    let chunk_rows = parse_chunk_rows(&chunk_out);
+    let rows = parse_rows(&rows_bytes);
+    let chunk_rows = parse_chunk_rows(&chunk_bytes);
     assert_eq!(rows.len(), rows_written);
     assert!(!rows.is_empty());
     assert!(!chunk_rows.is_empty());

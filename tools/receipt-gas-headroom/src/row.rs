@@ -1,3 +1,4 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{AccountId, BlockHeight, Gas, ProtocolVersion, ShardId};
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// A transaction producer can be given more gas by whoever signs it. A receipt
 /// producer cannot: its budget was fixed by already deployed code.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Producer {
     Transaction { tx_hash: CryptoHash, signer_id: AccountId },
     Receipt { receipt_id: CryptoHash, receiver_id: AccountId },
@@ -16,7 +17,7 @@ pub enum Producer {
 /// charged on, reduced to which parameter applies and how many units it covers.
 /// Covers both the actions of an action receipt and the value carried by a data
 /// receipt.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub enum ChargedItem {
     /// Charged per byte of `method_name` plus `args`, and once per action.
     /// The name is kept so the census can say which method a call was to, not
@@ -50,7 +51,7 @@ pub enum ChargedItem {
 
 /// One receipt a producer created, action or data, with the fields the fee
 /// analysis reads.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct ChildReceipt {
     pub receipt_id: CryptoHash,
     pub receiver_id: AccountId,
@@ -74,7 +75,7 @@ pub struct ChildReceipt {
 /// children whose attachment was computed from the leftover. It is `None` for a
 /// transaction producer, whose limit is its own attached gas and signer balance
 /// rather than a runtime gas counter.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct ProducerRow {
     pub block_height: BlockHeight,
     pub shard_id: ShardId,
@@ -91,7 +92,9 @@ pub struct ProducerRow {
 /// almost never lands on one.
 /// Which of the four `AccessKeyPermission` forms a key was added with. Only
 /// the function call forms pay `add_function_call_key_byte`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize,
+)]
 pub enum AddedKeyPermission {
     FullAccess,
     FunctionCall,
@@ -116,7 +119,7 @@ pub fn attached_gas_is_derived(attached_gas: Gas) -> bool {
 /// Per chunk totals, so the scan also answers what a chunk normally holds:
 /// how many transactions and receipts it carries, and how much of its gas and
 /// compute budget it spends.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct ChunkRow {
     pub block_height: BlockHeight,
     pub shard_id: ShardId,
@@ -157,4 +160,65 @@ pub struct CrossChecks {
     /// committed to constant children. A nonzero count is a modelling error,
     /// the shape the missing execution fees had.
     pub receipts_with_negative_gas_left: u64,
+}
+
+/// Counts of values falling in power of two buckets, so a distribution costs a
+/// fixed 64 counters however many values it saw. `max` is kept exactly because
+/// the largest payload is what a per-byte fee increase hits hardest, and a
+/// bucket would round it away.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Histogram {
+    pub count: u64,
+    pub sum: u128,
+    pub max: u64,
+    /// `buckets[i]` counts values in `[2^(i-1), 2^i)`, with zero in bucket 0.
+    pub buckets: Vec<u64>,
+}
+
+impl Histogram {
+    pub fn record(&mut self, value: u64) {
+        if self.buckets.is_empty() {
+            self.buckets = vec![0; 65];
+        }
+        self.count += 1;
+        self.sum += u128::from(value);
+        self.max = self.max.max(value);
+        let bucket = if value == 0 { 0 } else { 64 - value.leading_zeros() as usize };
+        self.buckets[bucket] += 1;
+    }
+
+    /// Smallest bucket upper bound at or past the given share of the values.
+    /// Reported as a power of two, so it brackets the true percentile rather
+    /// than claiming a precision buckets do not have.
+    pub fn percentile_upper_bound(&self, share: f64) -> u64 {
+        let target = (self.count as f64 * share) as u64;
+        let mut seen = 0;
+        for (index, count) in self.buckets.iter().enumerate() {
+            seen += count;
+            if seen >= target {
+                return if index == 0 { 0 } else { 1u64 << (index - 1) };
+            }
+        }
+        self.max
+    }
+}
+
+/// What a run saw, kept as fixed size summaries so a year does not need the
+/// rows read back to answer what a chunk normally holds.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Census {
+    pub function_call_payload_bytes: Histogram,
+    pub deploy_contract_code_bytes: Histogram,
+    pub deploy_global_contract_code_bytes: Histogram,
+    pub added_key_method_names_bytes: Histogram,
+    pub returned_data_payload_bytes: Histogram,
+    pub attached_gas: Histogram,
+    pub gas_left_after_constant_children: Histogram,
+    pub children_per_producer: Histogram,
+    pub actions_per_receipt: Histogram,
+    /// Counts by action kind, and for added keys by which permission form.
+    pub items_by_kind: std::collections::BTreeMap<String, u64>,
+    pub added_keys_by_permission: std::collections::BTreeMap<String, u64>,
+    pub self_call_children: u64,
+    pub derived_gas_children: u64,
 }

@@ -13,10 +13,12 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+borsh.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+zstd.workspace = true
 
 near-chain.workspace = true
 near-chain-configs.workspace = true

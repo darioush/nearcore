@@ -1,5 +1,6 @@
 use crate::evaluate::{Analysis, InheritedLoss, evaluate};
 use crate::extract::extract_range;
+use crate::frame::{FrameReader, FrameWriter};
 use crate::row::ProducerRow;
 use anyhow::Context;
 use near_chain::ChainStore;
@@ -7,7 +8,7 @@ use near_chain_configs::GenesisValidationMode;
 use near_parameters::RuntimeConfigStore;
 use near_primitives::types::BlockHeight;
 use near_store::{Mode, NodeStorage};
-use std::io::{BufRead, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Parser)]
@@ -37,18 +38,23 @@ pub struct EvaluateCmd {
     inherited_loss: InheritedLoss,
 }
 
+/// Rows a frame holds before it is compressed and written. Wide enough for
+/// zstd to notice the repeated account ids, small enough that a run cut short
+/// loses little.
+const ROWS_PER_FRAME: usize = 4096;
+
 #[derive(clap::Parser)]
 pub struct ExtractCmd {
     #[clap(long)]
     start_height: BlockHeight,
     #[clap(long)]
     end_height: BlockHeight,
-    /// Where to write the producer rows. Defaults to stdout.
+    /// Where to write the producer rows, as zstd compressed borsh frames.
     #[clap(long)]
-    out: Option<PathBuf>,
-    /// Where to write the per chunk totals. Skipped when not given.
+    out: PathBuf,
+    /// Where to write the per chunk totals, in the same format.
     #[clap(long)]
-    chunk_out: Option<PathBuf>,
+    chunk_out: PathBuf,
 }
 
 impl ReceiptGasHeadroomCommand {
@@ -68,10 +74,7 @@ impl EvaluateCmd {
     fn run(self) -> anyhow::Result<()> {
         let file = std::fs::File::open(&self.rows)
             .with_context(|| format!("failed to open {}", self.rows.display()))?;
-        let rows = BufReader::new(file).lines().map(|line| {
-            let line = line?;
-            Ok(serde_json::from_str::<ProducerRow>(&line)?)
-        });
+        let rows = FrameReader::<_, ProducerRow>::new(BufReader::new(file)).map(Ok);
         // `for_chain_id` only differs from this for benchmarknet, which has no
         // archival data to evaluate.
         let configs = RuntimeConfigStore::new();
@@ -99,15 +102,14 @@ impl ExtractCmd {
             near_config.genesis.config.transaction_validity_period,
         );
 
-        let mut out: Box<dyn std::io::Write> = match &self.out {
-            Some(path) => Box::new(BufWriter::new(std::fs::File::create(path)?)),
-            None => Box::new(BufWriter::new(std::io::stdout())),
-        };
-        let mut chunk_out: Box<dyn std::io::Write> = match &self.chunk_out {
-            Some(path) => Box::new(BufWriter::new(std::fs::File::create(path)?)),
-            None => Box::new(std::io::sink()),
-        };
-        let (rows, checks) = extract_range(
+        // Rows are framed and compressed, so stdout is not an option.
+        let mut out =
+            FrameWriter::new(BufWriter::new(std::fs::File::create(&self.out)?), ROWS_PER_FRAME);
+        let mut chunk_out = FrameWriter::new(
+            BufWriter::new(std::fs::File::create(&self.chunk_out)?),
+            ROWS_PER_FRAME,
+        );
+        let (rows, checks, census) = extract_range(
             &chain_store,
             self.start_height,
             self.end_height,
@@ -116,6 +118,9 @@ impl ExtractCmd {
         )?;
         tracing::info!(target: "receipt-gas-headroom", rows, "extract finished");
         eprintln!("{}", serde_json::to_string_pretty(&checks)?);
+        eprintln!("{}", serde_json::to_string_pretty(&census)?);
+        out.finish()?;
+        chunk_out.finish()?;
         Ok(())
     }
 }

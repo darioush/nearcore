@@ -4779,6 +4779,7 @@ name = "near-receipt-gas-headroom-tool"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "borsh",
  "clap",
  "near-chain",
  "near-chain-configs",
@@ -4790,6 +4791,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
