@@ -22,6 +22,7 @@ use near_ping::PingCommand;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::compute_root_from_path;
 use near_primitives::types::{Gas, NumSeats, NumShards, ProtocolVersion, ShardId};
+use near_receipt_gas_headroom_tool::ReceiptGasHeadroomCommand;
 use near_replay_archive_tool::ReplayArchiveCommand;
 use near_replay_tool::ReplayCommand;
 use near_state_viewer::StateViewerSubCommand;
@@ -155,6 +156,9 @@ impl NeardCmd {
                     &neard_cmd.opts.o11y,
                 )?;
             }
+            NeardSubCommand::ReceiptGasHeadroom(cmd) => {
+                cmd.run(&home_dir, genesis_validation)?;
+            }
             NeardSubCommand::ReplayArchive(cmd) => {
                 cmd.run(&home_dir, genesis_validation)?;
             }
@@ -270,6 +274,9 @@ pub(super) enum NeardSubCommand {
 
     /// Replays the blocks in the chain from an archival node.
     ReplayArchive(ReplayArchiveCommand),
+    /// Extract per-receipt gas headroom from an archival database, and evaluate
+    /// how a fee increase would land on it.
+    ReceiptGasHeadroom(ReceiptGasHeadroomCommand),
 
     /// Replay chunks from a database snapshot and verify results.
     Replay(ReplayCommand),

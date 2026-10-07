@@ -4775,6 +4775,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-receipt-gas-headroom-tool"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "near-chain",
+ "near-chain-configs",
+ "near-primitives",
+ "near-store",
+ "nearcore",
+ "node-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "near-replay"
 version = "0.0.0"
 dependencies = [
@@ -5195,6 +5212,7 @@ dependencies = [
  "near-o11y",
  "near-ping",
  "near-primitives",
+ "near-receipt-gas-headroom-tool",
  "near-replay-archive-tool",
  "near-replay-tool",
  "near-store",

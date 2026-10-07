@@ -77,6 +77,7 @@ members = [
     "tools/mock-node",
     "tools/ping",
     "tools/protocol-schema-check",
+    "tools/receipt-gas-headroom",
     "tools/replay",
     "tools/restaked",
     "tools/state-viewer",
@@ -210,6 +211,7 @@ near-account-id = { version = "3.0.0", features = ["serde", "borsh"] }
 near-gas = { version = "0.3.2" }
 near-token = { version = "0.3.2" }
 near-database-tool = { path = "tools/database" }
+near-receipt-gas-headroom-tool = { path = "tools/receipt-gas-headroom" }
 near-async = { path = "core/async" }
 near-async-derive = { path = "core/async-derive" }
 near-cache = { path = "utils/near-cache" }
