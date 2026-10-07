@@ -77,3 +77,24 @@ pub const CONSTANT_ATTACHED_GAS_GRANULARITY: u64 = 100_000_000_000;
 pub fn attached_gas_is_derived(attached_gas: Gas) -> bool {
     attached_gas.as_gas() % CONSTANT_ATTACHED_GAS_GRANULARITY != 0
 }
+
+/// Per chunk totals, so the scan also answers what a chunk normally holds:
+/// how many transactions and receipts it carries, and how much of its gas and
+/// compute budget it spends.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChunkRow {
+    pub block_height: BlockHeight,
+    pub shard_id: ShardId,
+    pub protocol_version: ProtocolVersion,
+    pub transactions: u64,
+    /// Receipts this chunk produced, from `OutgoingReceipts`.
+    pub action_receipts_created: u64,
+    pub data_receipts_created: u64,
+    /// Outcomes in this chunk whose producer was a receipt rather than a
+    /// transaction, which is what the chunk actually executed.
+    pub receipts_processed: u64,
+    pub gas_burnt: Gas,
+    /// Summed from the outcomes. `None` on outcomes written before compute
+    /// costs were recorded, which are counted as zero.
+    pub compute_usage: u64,
+}

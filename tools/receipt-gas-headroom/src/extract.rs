@@ -1,9 +1,12 @@
-use crate::row::{ChargedItem, ChildReceipt, Producer, ProducerRow, attached_gas_is_derived};
+use crate::row::{
+    ChargedItem, ChildReceipt, ChunkRow, Producer, ProducerRow, attached_gas_is_derived,
+};
 use anyhow::Context;
 use near_chain::{ChainStore, ChainStoreAccess};
 use near_primitives::action::Action;
 use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::{Receipt, VersionedReceiptEnum};
+use near_primitives::types::ProtocolVersion;
 use near_primitives::types::{AccountId, BlockHeight, Gas, ShardId};
 use std::collections::HashMap;
 use std::io::Write;
@@ -101,9 +104,11 @@ fn extract_chunk(
     block_hash: &CryptoHash,
     block_height: BlockHeight,
     shard_id: ShardId,
-    protocol_version: near_primitives::types::ProtocolVersion,
+    protocol_version: ProtocolVersion,
+    transactions_in_chunk: u64,
     transaction_signers: &HashMap<CryptoHash, AccountId>,
     out: &mut impl Write,
+    chunk_out: &mut impl Write,
 ) -> anyhow::Result<usize> {
     let produced = match chain_store.get_outgoing_receipts(block_hash, shard_id) {
         Ok(receipts) => receipts,
@@ -115,6 +120,26 @@ fn extract_chunk(
     let produced_by_id: HashMap<CryptoHash, &Receipt> =
         produced.iter().map(|receipt| (*receipt.receipt_id(), receipt)).collect();
 
+    let mut chunk_row = ChunkRow {
+        block_height,
+        shard_id,
+        protocol_version,
+        transactions: transactions_in_chunk,
+        action_receipts_created: 0,
+        data_receipts_created: 0,
+        receipts_processed: 0,
+        gas_burnt: Gas::ZERO,
+        compute_usage: 0,
+    };
+    for receipt in produced.iter() {
+        match receipt.versioned_receipt() {
+            VersionedReceiptEnum::Action(_) | VersionedReceiptEnum::PromiseYield(_) => {
+                chunk_row.action_receipts_created += 1
+            }
+            _ => chunk_row.data_receipts_created += 1,
+        }
+    }
+
     let mut rows_written = 0;
     for outcome_id in outcome_ids {
         let Some(outcome_with_proof) =
@@ -123,6 +148,8 @@ fn extract_chunk(
             continue;
         };
         let outcome = outcome_with_proof.outcome;
+        chunk_row.gas_burnt = chunk_row.gas_burnt.saturating_add(outcome.gas_burnt);
+        chunk_row.compute_usage += outcome.compute_usage.unwrap_or_default();
 
         let children: Vec<ChildReceipt> = outcome
             .receipt_ids
@@ -144,6 +171,7 @@ fn extract_chunk(
                 None,
             ),
             None => {
+                chunk_row.receipts_processed += 1;
                 let Some(receipt) = chain_store.get_receipt(&outcome_id) else { continue };
                 let (VersionedReceiptEnum::Action(action_receipt)
                 | VersionedReceiptEnum::PromiseYield(action_receipt)) = receipt.versioned_receipt()
@@ -185,6 +213,8 @@ fn extract_chunk(
         out.write_all(b"\n")?;
         rows_written += 1;
     }
+    serde_json::to_writer(&mut *chunk_out, &chunk_row)?;
+    chunk_out.write_all(b"\n")?;
     Ok(rows_written)
 }
 
@@ -193,6 +223,7 @@ pub fn extract_range(
     start_height: BlockHeight,
     end_height: BlockHeight,
     out: &mut impl Write,
+    chunk_out: &mut impl Write,
 ) -> anyhow::Result<usize> {
     let mut total_rows = 0;
     for height in start_height..=end_height {
@@ -201,23 +232,29 @@ pub fn extract_range(
         let protocol_version = block.header().latest_protocol_version();
 
         let mut transaction_signers = HashMap::new();
+        let mut transactions_per_shard = HashMap::new();
         for chunk_header in block.chunks().iter_raw() {
             let Ok(chunk) = chain_store.get_chunk(&chunk_header.chunk_hash()) else { continue };
-            for transaction in chunk.to_transactions() {
+            let transactions = chunk.to_transactions();
+            transactions_per_shard.insert(chunk_header.shard_id(), transactions.len() as u64);
+            for transaction in transactions {
                 transaction_signers
                     .insert(transaction.get_hash(), transaction.transaction.signer_id().clone());
             }
         }
 
         for chunk_header in block.chunks().iter_raw() {
+            let shard_id = chunk_header.shard_id();
             total_rows += extract_chunk(
                 chain_store,
                 &block_hash,
                 height,
-                chunk_header.shard_id(),
+                shard_id,
                 protocol_version,
+                transactions_per_shard.get(&shard_id).copied().unwrap_or_default(),
                 &transaction_signers,
                 out,
+                chunk_out,
             )?;
         }
     }

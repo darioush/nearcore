@@ -1,10 +1,13 @@
+use crate::evaluate::{Analysis, InheritedLoss, evaluate};
 use crate::extract::extract_range;
+use crate::row::ProducerRow;
 use anyhow::Context;
 use near_chain::ChainStore;
 use near_chain_configs::GenesisValidationMode;
+use near_parameters::RuntimeConfigStore;
 use near_primitives::types::BlockHeight;
 use near_store::{Mode, NodeStorage};
-use std::io::BufWriter;
+use std::io::{BufRead, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Parser)]
@@ -17,6 +20,21 @@ pub struct ReceiptGasHeadroomCommand {
 enum SubCommand {
     /// Read an archival database and write one row per producer as JSON lines.
     Extract(ExtractCmd),
+    /// Apply one candidate fee change to extracted rows and report what fails.
+    Evaluate(EvaluateCmd),
+}
+
+#[derive(clap::Parser)]
+pub struct EvaluateCmd {
+    /// Rows written by `extract`.
+    #[clap(long)]
+    rows: PathBuf,
+    #[clap(long, value_enum)]
+    analysis: Analysis,
+    /// Run with both settings and compare: matching failures pin the answer
+    /// exactly, so the proportional split never has to be written.
+    #[clap(long, value_enum, default_value = "none")]
+    inherited_loss: InheritedLoss,
 }
 
 #[derive(clap::Parser)]
@@ -25,9 +43,12 @@ pub struct ExtractCmd {
     start_height: BlockHeight,
     #[clap(long)]
     end_height: BlockHeight,
-    /// Where to write the rows. Defaults to stdout.
+    /// Where to write the producer rows. Defaults to stdout.
     #[clap(long)]
     out: Option<PathBuf>,
+    /// Where to write the per chunk totals. Skipped when not given.
+    #[clap(long)]
+    chunk_out: Option<PathBuf>,
 }
 
 impl ReceiptGasHeadroomCommand {
@@ -38,7 +59,25 @@ impl ReceiptGasHeadroomCommand {
     ) -> anyhow::Result<()> {
         match self.subcmd {
             SubCommand::Extract(cmd) => cmd.run(home_dir, genesis_validation),
+            SubCommand::Evaluate(cmd) => cmd.run(),
         }
+    }
+}
+
+impl EvaluateCmd {
+    fn run(self) -> anyhow::Result<()> {
+        let file = std::fs::File::open(&self.rows)
+            .with_context(|| format!("failed to open {}", self.rows.display()))?;
+        let rows = BufReader::new(file).lines().map(|line| {
+            let line = line?;
+            Ok(serde_json::from_str::<ProducerRow>(&line)?)
+        });
+        // `for_chain_id` only differs from this for benchmarknet, which has no
+        // archival data to evaluate.
+        let configs = RuntimeConfigStore::new();
+        let report = evaluate(rows, self.analysis, self.inherited_loss, &configs)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        Ok(())
     }
 }
 
@@ -64,7 +103,17 @@ impl ExtractCmd {
             Some(path) => Box::new(BufWriter::new(std::fs::File::create(path)?)),
             None => Box::new(BufWriter::new(std::io::stdout())),
         };
-        let rows = extract_range(&chain_store, self.start_height, self.end_height, &mut out)?;
+        let mut chunk_out: Box<dyn std::io::Write> = match &self.chunk_out {
+            Some(path) => Box::new(BufWriter::new(std::fs::File::create(path)?)),
+            None => Box::new(std::io::sink()),
+        };
+        let rows = extract_range(
+            &chain_store,
+            self.start_height,
+            self.end_height,
+            &mut out,
+            &mut chunk_out,
+        )?;
         tracing::info!(target: "receipt-gas-headroom", rows, "extract finished");
         Ok(())
     }
