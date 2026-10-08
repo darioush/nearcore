@@ -131,6 +131,20 @@ pub struct Failure {
     pub gas_left_after_constant_children: Gas,
 }
 
+/// How much further a fee could rise before the first receipt runs out. Extra
+/// burn scales linearly with the delta, so a receipt breaks once the delta is
+/// multiplied by `gas_left / extra_burn`. The smallest of those across the
+/// population is the largest rise that breaks nothing.
+#[derive(Serialize, Clone, Debug)]
+pub struct BreakingPoint {
+    pub multiplier: f64,
+    pub receipt_id: CryptoHash,
+    pub receiver_id: AccountId,
+    pub block_height: near_primitives::types::BlockHeight,
+    pub extra_burn: Gas,
+    pub gas_left: Gas,
+}
+
 #[derive(Serialize, Default, Debug)]
 pub struct Report {
     pub rows_read: u64,
@@ -141,6 +155,12 @@ pub struct Report {
     pub failures: Vec<Failure>,
     /// Transactions that would need more gas attached. The signer can fix these.
     pub transactions_needing_more_gas: u64,
+    /// The receipt that would run out first if this fee rose further, and by
+    /// what factor the rise would have to exceed what was evaluated.
+    pub tightest: Option<BreakingPoint>,
+    /// How many receipts would break at each multiple of the evaluated rise,
+    /// so the cost of going further is visible rather than a single verdict.
+    pub failures_at_multiplier: Vec<(f64, u64)>,
 }
 
 pub fn evaluate(
@@ -150,6 +170,8 @@ pub fn evaluate(
     configs: &RuntimeConfigStore,
 ) -> anyhow::Result<Report> {
     let mut report = Report::default();
+    let mut multipliers: Vec<(f64, u64)> =
+        [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 1000.0].iter().map(|f| (*f, 0)).collect();
     let mut loss_by_receipt: HashMap<CryptoHash, Gas> = HashMap::new();
 
     for row in rows {
@@ -199,6 +221,29 @@ pub fn evaluate(
         let gas_left = row.gas_left_after_constant_children.unwrap_or(Gas::ZERO);
         let total_extra = extra_burn.saturating_add(inherited);
 
+        // Linear in the delta, so this is the factor at which it runs out.
+        if total_extra > Gas::ZERO {
+            let multiplier = gas_left.as_gas() as f64 / total_extra.as_gas() as f64;
+            let tighter =
+                report.tightest.as_ref().is_none_or(|current| multiplier < current.multiplier);
+            if tighter {
+                let Producer::Receipt { receiver_id, .. } = &row.producer else { unreachable!() };
+                report.tightest = Some(BreakingPoint {
+                    multiplier,
+                    receipt_id,
+                    receiver_id: receiver_id.clone(),
+                    block_height: row.block_height,
+                    extra_burn,
+                    gas_left,
+                });
+            }
+            for (factor, count) in multipliers.iter_mut() {
+                if total_extra.as_gas() as f64 * *factor > gas_left.as_gas() as f64 {
+                    *count += 1;
+                }
+            }
+        }
+
         if total_extra > gas_left {
             let Producer::Receipt { receiver_id, .. } = &row.producer else { unreachable!() };
             report.failures.push(Failure {
@@ -220,6 +265,7 @@ pub fn evaluate(
             }
         }
     }
+    report.failures_at_multiplier = multipliers;
     Ok(report)
 }
 
