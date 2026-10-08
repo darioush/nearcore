@@ -48,9 +48,6 @@ pub enum ChargedItem {
         /// Prepaid balance a gas key carries, in yoctoNEAR.
         gas_key_balance: Option<u128>,
     },
-    /// Bytes of a value a contract returned, charged per output data receiver
-    /// by `new_data_receipt_byte`.
-    ReturnedData { payload_bytes: u64 },
     /// Charged per byte of the global contract code being published.
     DeployGlobalContract { code_bytes: u64 },
     /// Charged per byte of the identifier, which is a 32 byte code hash or an
@@ -95,6 +92,15 @@ pub struct ProducerRow {
     pub prepaid_gas: Option<Gas>,
     pub gas_burnt: Option<Gas>,
     pub gas_left_after_constant_children: Option<Gas>,
+    /// Bytes this receipt returned. `value_return` charges
+    /// `new_data_receipt_byte` on them once per output data receiver, on the
+    /// receipt that returned them rather than on the data receipt that carries
+    /// them, which is nobody's child and holds no gas.
+    pub returned_bytes: u64,
+    /// Output data receivers that are the producer itself, so their share of
+    /// that charge is the one paid at the `send_sir` rate.
+    pub output_data_receivers_to_self: u32,
+    pub output_data_receivers_to_others: u32,
     pub children: Vec<ChildReceipt>,
 }
 
@@ -189,6 +195,10 @@ pub struct CrossChecks {
     /// at the two edges, which does not grow as the range gets longer.
     pub receipts_created: u64,
     pub receipts_processed: u64,
+    /// Outcomes that returned a value to at least one receiver, so the
+    /// `new_data_receipt_byte` charge applied. A zero here while that fee is
+    /// being analysed means the analysis is multiplying its delta by nothing.
+    pub receipts_that_returned_data: u64,
     /// Receipts whose prepaid gas did not cover what they burned plus what they
     /// committed to constant children. A nonzero count is a modelling error,
     /// the shape the missing execution fees had.

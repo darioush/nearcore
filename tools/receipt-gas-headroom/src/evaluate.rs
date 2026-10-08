@@ -68,11 +68,6 @@ fn extra_gas(
                 .saturating_mul(*method_names_bytes)
         }
 
-        (Analysis::SendSirAllPerByte, ChargedItem::ReturnedData { payload_bytes }) => {
-            send_sir_rise_to_not_sir(ActionCosts::new_data_receipt_byte)
-                .saturating_mul(*payload_bytes)
-        }
-
         (Analysis::SendSirAllPerByte, ChargedItem::DeployGlobalContract { code_bytes }) => {
             send_sir_rise_to_not_sir(ActionCosts::deploy_global_contract_byte)
                 .saturating_mul(*code_bytes)
@@ -161,11 +156,27 @@ pub fn evaluate(
         let row = row?;
         report.rows_read += 1;
 
-        let extra_burn = row
+        let mut extra_burn = row
             .children
             .iter()
             .map(|child| extra_gas_for_child(child, analysis, row.protocol_version, configs))
             .fold(Gas::ZERO, |total, gas| total.saturating_add(gas));
+
+        // `value_return` charges `new_data_receipt_byte` once per output data
+        // receiver, so returning to yourself is charged at the sir rate. The
+        // data receipt that carries the bytes is nobody's child, so this would
+        // be missed if it were read off the children.
+        if analysis == Analysis::SendSirAllPerByte && row.output_data_receivers_to_self > 0 {
+            let fee = configs
+                .get_config(row.protocol_version)
+                .fees
+                .fee(ActionCosts::new_data_receipt_byte);
+            let rise = fee.send_fee(false).gas.saturating_sub(fee.send_fee(true).gas);
+            extra_burn = extra_burn.saturating_add(
+                rise.saturating_mul(row.returned_bytes)
+                    .saturating_mul(u64::from(row.output_data_receivers_to_self)),
+            );
+        }
 
         let receipt_id = match &row.producer {
             Producer::Transaction { .. } => {
@@ -251,6 +262,9 @@ mod tests {
             prepaid_gas: Some(tgas(100)),
             gas_burnt: Some(tgas(1)),
             gas_left_after_constant_children: Some(gas_left),
+            returned_bytes: 0,
+            output_data_receivers_to_self: 0,
+            output_data_receivers_to_others: 0,
             children,
         }
     }
@@ -320,22 +334,30 @@ mod tests {
     }
 
     #[test]
-    fn returned_data_is_charged_only_by_all_per_byte_analysis() {
+    fn returning_to_yourself_is_charged_only_by_all_per_byte_analysis() {
+        let returned_bytes = 1_000_000;
         let scant_gas_left = tgas(1);
-        let mut child = self_call_with_payload(0);
-        child.items = vec![ChargedItem::ReturnedData { payload_bytes: 1_000_000 }];
-        let only_call_and_deploy = run(
-            vec![receipt_producer(scant_gas_left, vec![child.clone()])],
-            Analysis::SendSirCallAndDeploy,
-            InheritedLoss::None,
-        );
+        let mut row = receipt_producer(scant_gas_left, vec![]);
+        row.returned_bytes = returned_bytes;
+        row.output_data_receivers_to_self = 1;
+
+        let only_call_and_deploy =
+            run(vec![row.clone()], Analysis::SendSirCallAndDeploy, InheritedLoss::None);
         assert!(only_call_and_deploy.failures.is_empty());
-        let all_per_byte = run(
-            vec![receipt_producer(scant_gas_left, vec![child])],
-            Analysis::SendSirAllPerByte,
-            InheritedLoss::None,
-        );
+
+        let all_per_byte = run(vec![row], Analysis::SendSirAllPerByte, InheritedLoss::None);
         assert_eq!(all_per_byte.failures.len(), 1);
+    }
+
+    #[test]
+    fn returning_to_another_account_is_not_charged_send_sir() {
+        let scant_gas_left = tgas(1);
+        let mut row = receipt_producer(scant_gas_left, vec![]);
+        row.returned_bytes = 1_000_000;
+        row.output_data_receivers_to_others = 1;
+
+        let report = run(vec![row], Analysis::SendSirAllPerByte, InheritedLoss::None);
+        assert!(report.failures.is_empty());
     }
 
     #[test]

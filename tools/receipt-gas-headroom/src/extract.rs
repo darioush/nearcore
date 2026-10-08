@@ -101,10 +101,6 @@ fn record_item(item: &ChargedItem, census: &mut Census) {
             "DeployGlobalContract"
         }
         ChargedItem::UseGlobalContract { .. } => "UseGlobalContract",
-        ChargedItem::ReturnedData { payload_bytes } => {
-            census.returned_data_payload_bytes.record(*payload_bytes);
-            "ReturnedData"
-        }
         ChargedItem::AddKey { permission, method_names_bytes, .. } => {
             census.added_key_method_names_bytes.record(*method_names_bytes);
             *census.added_keys_by_permission.entry(format!("{permission:?}")).or_default() += 1;
@@ -132,9 +128,11 @@ fn child_receipt(receipt: &Receipt) -> Option<ChildReceipt> {
         // `new_data_receipt_byte` is charged on the returned value, once per
         // output data receiver, with `sir` meaning the value comes back to the
         // account that produced it. See `value_return` in near-vm-runner.
-        VersionedReceiptEnum::Data(data_receipt) => {
-            let payload_bytes = data_receipt.data.as_ref().map_or(0, |data| data.len() as u64);
-            (Gas::ZERO, vec![ChargedItem::ReturnedData { payload_bytes }])
+        // A data receipt carries a returned value and no gas. The charge for
+        // those bytes fell on whoever called `value_return`, so it is recorded
+        // on that producer rather than here.
+        VersionedReceiptEnum::Data(_) => {
+            (Gas::ZERO, vec![ChargedItem::Other { kind: "Data".to_owned() }])
         }
         // `promise_yield_resume` pays `yield_resume_byte`, an ext cost with no
         // send or execution split, so none of the per-byte action fees apply.
@@ -245,6 +243,7 @@ fn extract_chunk(
         // An outcome id is either a transaction hash or a receipt id. The
         // transactions of this chunk are the only transaction hashes that can
         // appear, so a miss means the producer was a receipt.
+        let mut returned_facts = (0u64, 0u32, 0u32);
         let (producer, prepaid_gas, gas_burnt, gas_left) =
             match transaction_signers.get(&outcome_id) {
                 Some(signer_id) => (
@@ -299,6 +298,31 @@ fn extract_chunk(
                     if shortfall < 0 {
                         checks.receipts_with_negative_gas_left += 1;
                     }
+                    // `value_return` charges `new_data_receipt_byte` once per
+                    // output data receiver, at the sir rate for the producer's own
+                    // account. The bytes are what the outcome returned.
+                    let returned = match &outcome.status {
+                        near_primitives::transaction::ExecutionStatus::SuccessValue(value) => {
+                            value.len() as u64
+                        }
+                        _ => 0,
+                    };
+                    let (to_self, to_others) = action_receipt.output_data_receivers().iter().fold(
+                        (0u32, 0u32),
+                        |(own, other), data_receiver| {
+                            if &data_receiver.receiver_id == receipt.receiver_id() {
+                                (own + 1, other)
+                            } else {
+                                (own, other + 1)
+                            }
+                        },
+                    );
+                    if returned > 0 && to_self + to_others > 0 {
+                        checks.receipts_that_returned_data += 1;
+                        census.returned_data_payload_bytes.record(returned);
+                    }
+                    returned_facts = (returned, to_self, to_others);
+
                     let headroom: u64 = shortfall.max(0).try_into().unwrap_or(u64::MAX);
                     census.gas_left_after_constant_children.record(headroom);
                     if kind == ExecutedReceiptKind::PromiseYield {
@@ -329,6 +353,9 @@ fn extract_chunk(
             prepaid_gas,
             gas_burnt,
             gas_left_after_constant_children: gas_left,
+            returned_bytes: returned_facts.0,
+            output_data_receivers_to_self: returned_facts.1,
+            output_data_receivers_to_others: returned_facts.2,
             children,
         };
         out.write(&row)?;
