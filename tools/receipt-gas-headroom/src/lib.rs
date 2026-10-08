@@ -7,6 +7,6 @@ mod row;
 pub use cli::ReceiptGasHeadroomCommand;
 pub use evaluate::{Analysis, InheritedLoss, Report};
 pub use row::{
-    AddedKeyPermission, Census, ChargedItem, ChildReceipt, ChunkRow, CrossChecks, Histogram,
-    Producer, ProducerRow,
+    AddedKeyPermission, Census, ChargedItem, ChildReceipt, ChunkRow, CrossChecks,
+    ExecutedReceiptKind, Histogram, Producer, ProducerRow,
 };

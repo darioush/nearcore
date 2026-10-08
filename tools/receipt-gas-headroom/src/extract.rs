@@ -1,7 +1,7 @@
 use crate::frame::FrameWriter;
 use crate::row::{
-    AddedKeyPermission, Census, ChargedItem, ChildReceipt, ChunkRow, CrossChecks, Producer,
-    ProducerRow, attached_gas_is_derived,
+    AddedKeyPermission, Census, ChargedItem, ChildReceipt, ChunkRow, CrossChecks,
+    ExecutedReceiptKind, Producer, ProducerRow, attached_gas_is_derived,
 };
 use anyhow::Context;
 use near_chain::{ChainStore, ChainStoreAccess};
@@ -12,7 +12,7 @@ use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::{Receipt, VersionedReceiptEnum};
 use near_primitives::types::ProtocolVersion;
 use near_primitives::types::{AccountId, BlockHeight, Gas, ShardId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 /// Charged the same way `null_terminated_method_names_len` does in
@@ -167,6 +167,8 @@ fn extract_chunk(
     transaction_signers: &HashMap<CryptoHash, AccountId>,
     configs: &RuntimeConfigStore,
     gas_used_from_next_header: Option<Gas>,
+    receipts_by_id: &HashMap<CryptoHash, Receipt>,
+    claimed_in_range: &mut HashSet<CryptoHash>,
     checks: &mut CrossChecks,
     census: &mut Census,
     out: &mut FrameWriter<impl Write>,
@@ -178,9 +180,6 @@ fn extract_chunk(
         Err(_) => return Ok(0),
     };
     let outcome_ids = chain_store.get_outcomes_by_block_hash_and_shard_id(block_hash, shard_id);
-
-    let produced_by_id: HashMap<CryptoHash, &Receipt> =
-        produced.iter().map(|receipt| (*receipt.receipt_id(), receipt)).collect();
 
     let mut claimed: HashMap<CryptoHash, u32> = HashMap::new();
     let mut chunk_row = ChunkRow {
@@ -208,22 +207,24 @@ fn extract_chunk(
         let Some(outcome_with_proof) =
             chain_store.get_outcome_by_id_and_block_hash(&outcome_id, block_hash)
         else {
+            checks.skipped_outcome_missing += 1;
             continue;
         };
         let outcome = outcome_with_proof.outcome;
         chunk_row.gas_burnt = chunk_row.gas_burnt.saturating_add(outcome.gas_burnt);
         chunk_row.compute_usage += outcome.compute_usage.unwrap_or_default();
 
+        // Resolved against every receipt the range sent, not just this chunk's.
+        // A chunk sends what it can, buffering the rest for a later one, so a
+        // producer's children are not all in the chunk that ran it.
         for receipt_id in &outcome.receipt_ids {
-            if produced_by_id.contains_key(receipt_id) {
-                *claimed.entry(*receipt_id).or_default() += 1;
-            }
+            *claimed.entry(*receipt_id).or_default() += 1;
         }
         let children: Vec<ChildReceipt> = outcome
             .receipt_ids
             .iter()
-            .filter_map(|receipt_id| produced_by_id.get(receipt_id))
-            .filter_map(|receipt| child_receipt(receipt))
+            .filter_map(|receipt_id| receipts_by_id.get(receipt_id))
+            .filter_map(child_receipt)
             .collect();
         census.children_per_producer.record(children.len() as u64);
         for child in &children {
@@ -243,70 +244,81 @@ fn extract_chunk(
         // An outcome id is either a transaction hash or a receipt id. The
         // transactions of this chunk are the only transaction hashes that can
         // appear, so a miss means the producer was a receipt.
-        let (producer, prepaid_gas, gas_burnt, gas_left) = match transaction_signers
-            .get(&outcome_id)
-        {
-            Some(signer_id) => (
-                Producer::Transaction { tx_hash: outcome_id, signer_id: signer_id.clone() },
-                None,
-                None,
-                None,
-            ),
-            None => {
-                chunk_row.receipts_processed += 1;
-                let Some(receipt) = chain_store.get_receipt(&outcome_id) else { continue };
-                let (VersionedReceiptEnum::Action(action_receipt)
-                | VersionedReceiptEnum::PromiseYield(action_receipt)) = receipt.versioned_receipt()
-                else {
-                    continue;
-                };
-                // A receipt's budget is the gas attached to its function calls
-                // plus the execution fees bought for it, the same sum
-                // `refund_unspent_gas_and_deposits` refunds against. Leaving
-                // the fees out makes a refund receipt, whose actions attach no
-                // gas at all, look like it burned more than it had.
-                let config = configs.get_config(protocol_version);
-                let attached_gas =
-                    node_runtime::config::total_prepaid_gas(action_receipt.actions())
-                        .context("prepaid gas overflow")?;
-                let exec_fees = node_runtime::config::total_prepaid_exec_fees(
-                    config,
-                    action_receipt.actions(),
-                    receipt.receiver_id(),
-                )
-                .context("prepaid exec fee overflow")?
-                .gas
-                .checked_add(config.fees.fee(ActionCosts::new_action_receipt).exec_fee().gas)
-                .context("prepaid exec fee overflow")?;
-                let prepaid_gas =
-                    attached_gas.checked_add(exec_fees).context("prepaid gas overflow")?;
-                let constant_children_gas = children
-                    .iter()
-                    .filter(|child| !child.attached_gas_is_derived)
-                    .fold(Gas::ZERO, |total, child| total.saturating_add(child.attached_gas));
-                let shortfall = i128::from(prepaid_gas.as_gas())
-                    - i128::from(outcome.gas_burnt.as_gas())
-                    - i128::from(constant_children_gas.as_gas());
-                if shortfall < 0 {
-                    checks.receipts_with_negative_gas_left += 1;
+        let (producer, prepaid_gas, gas_burnt, gas_left) =
+            match transaction_signers.get(&outcome_id) {
+                Some(signer_id) => (
+                    Producer::Transaction { tx_hash: outcome_id, signer_id: signer_id.clone() },
+                    None,
+                    None,
+                    None,
+                ),
+                None => {
+                    chunk_row.receipts_processed += 1;
+                    let Some(receipt) = chain_store.get_receipt(&outcome_id) else {
+                        checks.skipped_receipt_not_stored += 1;
+                        continue;
+                    };
+                    let (kind, action_receipt) = match receipt.versioned_receipt() {
+                        VersionedReceiptEnum::Action(inner) => (ExecutedReceiptKind::Action, inner),
+                        VersionedReceiptEnum::PromiseYield(inner) => {
+                            (ExecutedReceiptKind::PromiseYield, inner)
+                        }
+                        _ => {
+                            checks.skipped_producer_not_an_action_receipt += 1;
+                            continue;
+                        }
+                    };
+                    // A receipt's budget is the gas attached to its function calls
+                    // plus the execution fees bought for it, the same sum
+                    // `refund_unspent_gas_and_deposits` refunds against. Leaving
+                    // the fees out makes a refund receipt, whose actions attach no
+                    // gas at all, look like it burned more than it had.
+                    let config = configs.get_config(protocol_version);
+                    let attached_gas =
+                        node_runtime::config::total_prepaid_gas(action_receipt.actions())
+                            .context("prepaid gas overflow")?;
+                    let exec_fees = node_runtime::config::total_prepaid_exec_fees(
+                        config,
+                        action_receipt.actions(),
+                        receipt.receiver_id(),
+                    )
+                    .context("prepaid exec fee overflow")?
+                    .gas
+                    .checked_add(config.fees.fee(ActionCosts::new_action_receipt).exec_fee().gas)
+                    .context("prepaid exec fee overflow")?;
+                    let prepaid_gas =
+                        attached_gas.checked_add(exec_fees).context("prepaid gas overflow")?;
+                    let constant_children_gas = children
+                        .iter()
+                        .filter(|child| !child.attached_gas_is_derived)
+                        .fold(Gas::ZERO, |total, child| total.saturating_add(child.attached_gas));
+                    let shortfall = i128::from(prepaid_gas.as_gas())
+                        - i128::from(outcome.gas_burnt.as_gas())
+                        - i128::from(constant_children_gas.as_gas());
+                    if shortfall < 0 {
+                        checks.receipts_with_negative_gas_left += 1;
+                    }
+                    let headroom: u64 = shortfall.max(0).try_into().unwrap_or(u64::MAX);
+                    census.gas_left_after_constant_children.record(headroom);
+                    if kind == ExecutedReceiptKind::PromiseYield {
+                        census.yield_callbacks_run += 1;
+                        census.yield_callback_gas_left.record(headroom);
+                    }
+                    let gas_left = prepaid_gas
+                        .saturating_sub(outcome.gas_burnt)
+                        .saturating_sub(constant_children_gas);
+                    (
+                        Producer::Receipt {
+                            receipt_id: outcome_id,
+                            receiver_id: receipt.receiver_id().clone(),
+                            kind,
+                        },
+                        Some(prepaid_gas),
+                        Some(outcome.gas_burnt),
+                        Some(gas_left),
+                    )
                 }
-                census
-                    .gas_left_after_constant_children
-                    .record(shortfall.max(0).try_into().unwrap_or(u64::MAX));
-                let gas_left = prepaid_gas
-                    .saturating_sub(outcome.gas_burnt)
-                    .saturating_sub(constant_children_gas);
-                (
-                    Producer::Receipt {
-                        receipt_id: outcome_id,
-                        receiver_id: receipt.receiver_id().clone(),
-                    },
-                    Some(prepaid_gas),
-                    Some(outcome.gas_burnt),
-                    Some(gas_left),
-                )
-            }
-        };
+            };
 
         let row = ProducerRow {
             block_height,
@@ -324,9 +336,10 @@ fn extract_chunk(
     checks.chunks_checked += 1;
     checks.receipts_created += chunk_row.action_receipts_created + chunk_row.data_receipts_created;
     checks.receipts_processed += chunk_row.receipts_processed;
-    checks.unclaimed_receipts +=
-        produced.iter().filter(|r| !claimed.contains_key(r.receipt_id())).count() as u64;
     checks.doubly_claimed_receipts += claimed.values().filter(|count| **count > 1).count() as u64;
+    for (receipt_id, _) in claimed.iter() {
+        claimed_in_range.insert(*receipt_id);
+    }
     if let Some(recorded) = gas_used_from_next_header {
         let difference = i128::from(chunk_row.gas_burnt.as_gas()) - i128::from(recorded.as_gas());
         if difference != 0 {
@@ -351,6 +364,35 @@ pub fn extract_range(
     let configs = RuntimeConfigStore::new();
     let mut checks = CrossChecks::default();
     let mut census = Census::default();
+
+    // A chunk sends what its outgoing limits allow and buffers the rest for a
+    // later one, so the receipts a producer made are spread across the chunks
+    // that sent them. Indexing every receipt the range sent first means a
+    // producer's children resolve wherever they were sent from, which reading
+    // one chunk at a time cannot do. Sequential, unlike a lookup per child.
+    let mut receipts_by_id: HashMap<CryptoHash, Receipt> = HashMap::new();
+    let mut sent_at: Vec<(BlockHeight, CryptoHash)> = Vec::new();
+    for height in start_height..=end_height {
+        let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
+        let Ok(block) = chain_store.get_block(&block_hash) else { continue };
+        for chunk_header in block.chunks().iter_raw() {
+            let Ok(sent) = chain_store.get_outgoing_receipts(&block_hash, chunk_header.shard_id())
+            else {
+                continue;
+            };
+            for receipt in sent.iter() {
+                receipts_by_id.insert(*receipt.receipt_id(), receipt.clone());
+                sent_at.push((height, *receipt.receipt_id()));
+            }
+        }
+    }
+    tracing::info!(
+        target: "receipt-gas-headroom",
+        receipts = receipts_by_id.len(),
+        "indexed every receipt the range sent"
+    );
+
+    let mut claimed_in_range: HashSet<CryptoHash> = HashSet::new();
     let mut total_rows = 0;
     for height in start_height..=end_height {
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
@@ -394,6 +436,8 @@ pub fn extract_range(
                 &transaction_signers,
                 &configs,
                 gas_used_per_shard.get(&shard_id).copied(),
+                &receipts_by_id,
+                &mut claimed_in_range,
                 &mut checks,
                 &mut census,
                 out,
@@ -401,5 +445,30 @@ pub fn extract_range(
             )?;
         }
     }
+    // A receipt still unclaimed after the whole range was walked belongs to a
+    // producer that ran before the range started, so these should crowd its
+    // first blocks rather than spread through it.
+    for (height, receipt_id) in sent_at {
+        if claimed_in_range.contains(&receipt_id) {
+            continue;
+        }
+        checks.unclaimed_receipts += 1;
+        let kind = match receipts_by_id.get(&receipt_id).map(|r| r.versioned_receipt()) {
+            Some(VersionedReceiptEnum::Action(_)) => "Action",
+            Some(VersionedReceiptEnum::PromiseYield(_)) => "PromiseYield",
+            Some(VersionedReceiptEnum::Data(_)) => "Data",
+            Some(VersionedReceiptEnum::PromiseResume(_)) => "PromiseResume",
+            Some(VersionedReceiptEnum::GlobalContractDistribution(_)) => {
+                "GlobalContractDistribution"
+            }
+            None => "Unknown",
+        };
+        *checks.unclaimed_by_kind.entry(kind.to_owned()).or_default() += 1;
+        checks.unclaimed_offset_from_range_start.record(height.saturating_sub(start_height));
+        if kind != "PromiseResume" && checks.unclaimed_receipt_samples.len() < 20 {
+            checks.unclaimed_receipt_samples.push((height, receipt_id));
+        }
+    }
+
     Ok((total_rows, checks, census))
 }

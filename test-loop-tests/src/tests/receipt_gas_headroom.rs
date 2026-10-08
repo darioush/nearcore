@@ -1,7 +1,7 @@
 use crate::setup::builder::TestLoopBuilder;
 use crate::utils::transactions::make_accounts;
 use near_async::time::Duration;
-use near_chain::ChainStore;
+use near_chain::{ChainStore, ChainStoreAccess};
 use near_o11y::testonly::init_test_logger;
 use near_primitives::types::{AccountId, Balance, Gas};
 use near_receipt_gas_headroom_tool::extract::extract_range;
@@ -165,4 +165,92 @@ fn extract_records_self_calls_and_tells_fixed_gas_from_derived() {
     let gas_burnt_in_chunks: u64 =
         chunk_rows.iter().map(|chunk| chunk.gas_burnt.as_gas()).sum::<u64>();
     assert!(gas_burnt_in_chunks > 0, "running a contract should burn gas");
+}
+
+/// A promise yield resolves through a `PromiseResume` receipt, which executes
+/// and can produce receipts of its own. The extractor only recognised an
+/// `Action` or `PromiseYield` producer, so it walked past that outcome and the
+/// receipts it produced were left with no producer at all.
+#[test]
+fn yield_resume_producers_are_not_skipped() {
+    init_test_logger();
+
+    let epoch_length = 10;
+    let accounts = make_accounts(4);
+    let contract: AccountId = accounts[0].clone();
+    let caller: AccountId = accounts[1].clone();
+
+    let mut env = TestLoopBuilder::new()
+        .epoch_length(epoch_length)
+        .gc_num_epochs_to_keep(100)
+        .add_user_accounts(&accounts, Balance::from_near(1_000_000))
+        .build();
+
+    let timeout = Duration::seconds(90);
+    let deploy = env.node(0).tx_deploy_test_contract(&contract);
+    env.node_runner(0).run_tx(deploy, timeout);
+
+    let payload = vec![7u8; 16];
+    let yielded = env.node(0).tx_call(
+        &caller,
+        &contract,
+        "call_yield_create_and_resume",
+        payload,
+        Balance::ZERO,
+        Gas::from_gas(100_000_000_000_000),
+    );
+    env.node_runner(0).run_tx(yielded, timeout);
+
+    let node = env.node(0);
+    let head_height = node.head().height;
+    let chain_store = ChainStore::new(node.store(), true, 1000);
+
+    let mut rows_bytes = Vec::new();
+    let mut chunk_bytes = Vec::new();
+    let mut rows_out = FrameWriter::new(&mut rows_bytes, 64);
+    let mut chunk_out = FrameWriter::new(&mut chunk_bytes, 64);
+    let (_, checks, _) =
+        extract_range(&chain_store, 1, head_height, &mut rows_out, &mut chunk_out).unwrap();
+    rows_out.finish().unwrap();
+    chunk_out.finish().unwrap();
+
+    assert_eq!(
+        checks.skipped_producer_not_an_action_receipt, 0,
+        "a resumed yield executed and its outcome was walked past"
+    );
+    assert_eq!(checks.skipped_receipt_not_stored, 0, "a producer was not in DBCol::Receipts");
+    assert_eq!(checks.skipped_outcome_missing, 0, "an outcome id had no outcome");
+    for (height, receipt_id) in &checks.unclaimed_receipt_samples {
+        let receipt = chain_store.get_receipt(receipt_id).expect("sent receipt should be stored");
+        println!(
+            "ORPHAN h={height} {receipt_id} {} -> {} kind={:?}",
+            receipt.predecessor_id(),
+            receipt.receiver_id(),
+            std::mem::discriminant(receipt.receipt()),
+        );
+        match receipt.receipt() {
+            near_primitives::receipt::ReceiptEnum::Data(d)
+            | near_primitives::receipt::ReceiptEnum::PromiseResume(d) => {
+                println!(
+                    "  data receipt, data_id={} len={:?}",
+                    d.data_id,
+                    d.data.as_ref().map(|v| v.len())
+                )
+            }
+            other => println!("  {other:?}"),
+        }
+    }
+    // A resumed yield carries its payload in a receipt that is nobody's child,
+    // so it is expected here. Anything else is a producer that was missed.
+    let unexpected: u64 = checks
+        .unclaimed_by_kind
+        .iter()
+        .filter(|(kind, _)| kind.as_str() != "PromiseResume")
+        .map(|(_, count)| count)
+        .sum();
+    assert_eq!(unexpected, 0, "unclaimed by kind: {:?}", checks.unclaimed_by_kind);
+    assert!(
+        checks.unclaimed_by_kind.contains_key("PromiseResume"),
+        "the resumed yield should show up as the expected kind"
+    );
 }

@@ -246,6 +246,7 @@ mod tests {
             producer: Producer::Receipt {
                 receipt_id: CryptoHash::hash_bytes(b"producer"),
                 receiver_id: "caller.near".parse().unwrap(),
+                kind: crate::row::ExecutedReceiptKind::Action,
             },
             prepaid_gas: Some(tgas(100)),
             gas_burnt: Some(tgas(1)),
@@ -364,12 +365,16 @@ mod tests {
         parent.producer = Producer::Receipt {
             receipt_id: parent_id,
             receiver_id: "caller.near".parse().unwrap(),
+            kind: crate::row::ExecutedReceiptKind::Action,
         };
 
         let scant_gas_left = tgas(1);
         let mut child = receipt_producer(scant_gas_left, vec![]);
-        child.producer =
-            Producer::Receipt { receipt_id: child_id, receiver_id: "caller.near".parse().unwrap() };
+        child.producer = Producer::Receipt {
+            receipt_id: child_id,
+            receiver_id: "caller.near".parse().unwrap(),
+            kind: crate::row::ExecutedReceiptKind::Action,
+        };
 
         let rows = vec![parent, child];
         let without_inheritance =
@@ -395,11 +400,15 @@ mod tests {
         parent.producer = Producer::Receipt {
             receipt_id: parent_id,
             receiver_id: "caller.near".parse().unwrap(),
+            kind: crate::row::ExecutedReceiptKind::Action,
         };
 
         let mut child = receipt_producer(scant_gas_left, vec![]);
-        child.producer =
-            Producer::Receipt { receipt_id: child_id, receiver_id: "caller.near".parse().unwrap() };
+        child.producer = Producer::Receipt {
+            receipt_id: child_id,
+            receiver_id: "caller.near".parse().unwrap(),
+            kind: crate::row::ExecutedReceiptKind::Action,
+        };
 
         let report = run(
             vec![parent, child],

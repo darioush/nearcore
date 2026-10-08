@@ -10,7 +10,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Producer {
     Transaction { tx_hash: CryptoHash, signer_id: AccountId },
-    Receipt { receipt_id: CryptoHash, receiver_id: AccountId },
+    Receipt { receipt_id: CryptoHash, receiver_id: AccountId, kind: ExecutedReceiptKind },
+}
+
+/// Which receipt form executed. A `PromiseYield` callback runs on gas its
+/// creator reserved up to `yield_timeout_length_in_blocks` earlier, so whether
+/// it had enough is a separate question from an ordinary call.
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize,
+)]
+pub enum ExecutedReceiptKind {
+    Action,
+    PromiseYield,
 }
 
 /// Something a producer put in one of its children that a per-byte fee is
@@ -147,9 +158,28 @@ pub struct CrossChecks {
     /// means outcomes were missed, which silently drops producers.
     pub chunks_with_gas_mismatch: u64,
     pub worst_gas_mismatch: i128,
-    /// Receipts a chunk produced that no outcome in that chunk claimed as a
-    /// child, which would mean the join missed a producer.
+    /// Receipts the range sent that no outcome in it claimed as a child, by
+    /// receipt kind. A `PromiseResume` belongs here by construction: it carries
+    /// a payload to a promise that yielded earlier and is nobody's child, so
+    /// its count is expected rather than a fault. Any other kind is a producer
+    /// the analysis never saw.
     pub unclaimed_receipts: u64,
+    pub unclaimed_by_kind: std::collections::BTreeMap<String, u64>,
+    /// A few of those, with the block they were sent from, so their real
+    /// producer can be traced rather than guessed at.
+    pub unclaimed_receipt_samples: Vec<(BlockHeight, CryptoHash)>,
+    /// How far into the range each unclaimed receipt was sent. Once children
+    /// are resolved across the whole range, the only ones left should belong to
+    /// producers that ran before it started, so these should crowd the first
+    /// blocks and stop. A yield can wait `yield_timeout_length_in_blocks`, and
+    /// a congested buffer longer, so a thin tail is expected and a flat spread
+    /// across the range is not.
+    pub unclaimed_offset_from_range_start: Histogram,
+    /// Outcomes the extractor walked past. Each one drops a producer, and its
+    /// children then look unclaimed, so these say which skip is responsible.
+    pub skipped_outcome_missing: u64,
+    pub skipped_receipt_not_stored: u64,
+    pub skipped_producer_not_an_action_receipt: u64,
     /// Receipts claimed by more than one producer, which cannot happen.
     pub doubly_claimed_receipts: u64,
     /// Compared globally over a range: these differ only by what is in flight
@@ -221,4 +251,11 @@ pub struct Census {
     pub added_keys_by_permission: std::collections::BTreeMap<String, u64>,
     pub self_call_children: u64,
     pub derived_gas_children: u64,
+    /// Receipts that ran as a yielded callback, on gas their creator reserved
+    /// up to `yield_timeout_length_in_blocks` earlier, and how much of that
+    /// budget they had left. A callback given a share of what its creator had
+    /// left over rather than a fixed amount gets less when the creator burns
+    /// more, and finds out that many blocks later.
+    pub yield_callbacks_run: u64,
+    pub yield_callback_gas_left: Histogram,
 }
