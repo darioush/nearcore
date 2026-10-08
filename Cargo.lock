@@ -4781,6 +4781,7 @@ dependencies = [
  "anyhow",
  "borsh",
  "clap",
+ "indicatif",
  "near-chain",
  "near-chain-configs",
  "near-parameters",

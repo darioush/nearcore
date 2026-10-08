@@ -4,6 +4,7 @@ use crate::row::{
     ExecutedReceiptKind, Producer, ProducerRow, attached_gas_is_derived,
 };
 use anyhow::Context;
+use indicatif::{ProgressBar, ProgressStyle};
 use near_chain::{ChainStore, ChainStoreAccess};
 use near_parameters::{ActionCosts, RuntimeConfigStore};
 use near_primitives::account::AccessKeyPermission;
@@ -340,6 +341,9 @@ fn extract_chunk(
     for (receipt_id, _) in claimed.iter() {
         claimed_in_range.insert(*receipt_id);
     }
+    if gas_used_from_next_header.is_none() {
+        checks.chunks_without_a_gas_figure += 1;
+    }
     if let Some(recorded) = gas_used_from_next_header {
         let difference = i128::from(chunk_row.gas_burnt.as_gas()) - i128::from(recorded.as_gas());
         if difference != 0 {
@@ -370,9 +374,19 @@ pub fn extract_range(
     // that sent them. Indexing every receipt the range sent first means a
     // producer's children resolve wherever they were sent from, which reading
     // one chunk at a time cannot do. Sequential, unlike a lookup per child.
+    let blocks = end_height.saturating_sub(start_height) + 1;
+    let progress = ProgressBar::new(blocks * 2);
+    progress.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len} blocks {percent}% eta {eta}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
     let mut receipts_by_id: HashMap<CryptoHash, Receipt> = HashMap::new();
     let mut sent_at: Vec<(BlockHeight, CryptoHash)> = Vec::new();
+    progress.set_message("indexing sent receipts");
     for height in start_height..=end_height {
+        progress.inc(1);
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
         let Ok(block) = chain_store.get_block(&block_hash) else { continue };
         for chunk_header in block.chunks().iter_raw() {
@@ -394,7 +408,9 @@ pub fn extract_range(
 
     let mut claimed_in_range: HashSet<CryptoHash> = HashSet::new();
     let mut total_rows = 0;
+    progress.set_message("extracting producers ");
     for height in start_height..=end_height {
+        progress.inc(1);
         let Ok(block_hash) = chain_store.get_block_hash_by_height(height) else { continue };
         let Ok(block) = chain_store.get_block(&block_hash) else { continue };
         let protocol_version = block.header().latest_protocol_version();
@@ -406,8 +422,14 @@ pub fn extract_range(
         if let Ok(next_hash) = chain_store.get_block_hash_by_height(height + 1) {
             if let Ok(next_block) = chain_store.get_block(&next_hash) {
                 for chunk_header in next_block.chunks().iter_raw() {
-                    gas_used_per_shard
-                        .insert(chunk_header.shard_id(), chunk_header.prev_gas_used());
+                    // A shard with no chunk in the next block carries its old
+                    // header forward, so `prev_gas_used` would describe some
+                    // earlier block rather than this one. Only a header the
+                    // next block newly included says anything about this chunk.
+                    if chunk_header.is_new_chunk(height + 1) {
+                        gas_used_per_shard
+                            .insert(chunk_header.shard_id(), chunk_header.prev_gas_used());
+                    }
                 }
             }
         }
@@ -445,6 +467,8 @@ pub fn extract_range(
             )?;
         }
     }
+    progress.finish_with_message("extract finished    ");
+
     // A receipt still unclaimed after the whole range was walked belongs to a
     // producer that ran before the range started, so these should crowd its
     // first blocks rather than spread through it.

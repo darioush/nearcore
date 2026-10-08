@@ -157,6 +157,9 @@ pub struct CrossChecks {
     /// `prev_gas_used` the next block's chunk header recorded. Any mismatch
     /// means outcomes were missed, which silently drops producers.
     pub chunks_with_gas_mismatch: u64,
+    /// Chunks whose gas could not be checked because the next block included no
+    /// new chunk for that shard, so nothing recorded what this one used.
+    pub chunks_without_a_gas_figure: u64,
     pub worst_gas_mismatch: i128,
     /// Receipts the range sent that no outcome in it claimed as a child, by
     /// receipt kind. A `PromiseResume` belongs here by construction: it carries

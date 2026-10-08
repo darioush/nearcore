@@ -19,7 +19,7 @@ pub struct ReceiptGasHeadroomCommand {
 
 #[derive(clap::Parser)]
 enum SubCommand {
-    /// Read an archival database and write one row per producer as JSON lines.
+    /// Read an archival database and write one row per producer, by window.
     Extract(ExtractCmd),
     /// Apply one candidate fee change to extracted rows and report what fails.
     Evaluate(EvaluateCmd),
@@ -27,9 +27,10 @@ enum SubCommand {
 
 #[derive(clap::Parser)]
 pub struct EvaluateCmd {
-    /// Rows written by `extract`.
+    /// Directory `extract` wrote its windows into. Every `.rows` file in it is
+    /// read, so a range split across workers evaluates as one population.
     #[clap(long)]
-    rows: PathBuf,
+    out_dir: PathBuf,
     #[clap(long, value_enum)]
     analysis: Analysis,
     /// Run with both settings and compare: matching failures pin the answer
@@ -43,18 +44,29 @@ pub struct EvaluateCmd {
 /// loses little.
 const ROWS_PER_FRAME: usize = 4096;
 
+/// Blocks one window covers. Each window indexes the receipts it sent and
+/// resolves its own producers, so it can be rerun, skipped or handed to another
+/// worker on its own. A receipt whose producer ran before the window starts
+/// stays unclaimed in it, which the offset histogram counts, so the window
+/// wants to be wide against the couple of hundred blocks a yield or a congested
+/// buffer can delay a send by.
+const DEFAULT_WINDOW_BLOCKS: u64 = 20_000;
+
 #[derive(clap::Parser)]
 pub struct ExtractCmd {
     #[clap(long)]
     start_height: BlockHeight,
     #[clap(long)]
     end_height: BlockHeight,
-    /// Where to write the producer rows, as zstd compressed borsh frames.
+    /// Directory to write windows into. Each one lands as its own pair of
+    /// files, so a run that stops leaves finished windows behind.
     #[clap(long)]
-    out: PathBuf,
-    /// Where to write the per chunk totals, in the same format.
+    out_dir: PathBuf,
+    #[clap(long, default_value_t = DEFAULT_WINDOW_BLOCKS)]
+    window_blocks: u64,
+    /// Skip windows already written, rather than doing them again.
     #[clap(long)]
-    chunk_out: PathBuf,
+    resume: bool,
 }
 
 impl ReceiptGasHeadroomCommand {
@@ -72,9 +84,33 @@ impl ReceiptGasHeadroomCommand {
 
 impl EvaluateCmd {
     fn run(self) -> anyhow::Result<()> {
-        let file = std::fs::File::open(&self.rows)
-            .with_context(|| format!("failed to open {}", self.rows.display()))?;
-        let rows = FrameReader::<_, ProducerRow>::new(BufReader::new(file)).map(Ok);
+        let mut window_files: Vec<PathBuf> = std::fs::read_dir(&self.out_dir)
+            .with_context(|| format!("failed to read {}", self.out_dir.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rows"))
+            // A window killed midway still leaves readable frames, so without
+            // this a partial population would evaluate as if it were whole.
+            .filter(|path| path.with_extension("done").exists())
+            .collect();
+        // Height order, so a failure reads in the order the chain ran.
+        window_files.sort();
+        anyhow::ensure!(!window_files.is_empty(), "no window files in {}", self.out_dir.display());
+        tracing::info!(
+            target: "receipt-gas-headroom",
+            windows = window_files.len(),
+            "evaluating"
+        );
+        let rows = window_files
+            .into_iter()
+            .map(|path| -> anyhow::Result<_> {
+                let file = std::fs::File::open(&path)
+                    .with_context(|| format!("failed to open {}", path.display()))?;
+                Ok(FrameReader::<_, ProducerRow>::new(BufReader::new(file)))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .map(Ok);
         // `for_chain_id` only differs from this for benchmarknet, which has no
         // archival data to evaluate.
         let configs = RuntimeConfigStore::new();
@@ -82,6 +118,12 @@ impl EvaluateCmd {
         println!("{}", serde_json::to_string_pretty(&report)?);
         Ok(())
     }
+}
+
+/// Written once a window's files are complete, so a resumed run can tell a
+/// finished window from one that was cut off midway.
+fn window_marker(out_dir: &Path, start: BlockHeight, end: BlockHeight) -> PathBuf {
+    out_dir.join(format!("{start}-{end}.done"))
 }
 
 impl ExtractCmd {
@@ -102,25 +144,62 @@ impl ExtractCmd {
             near_config.genesis.config.transaction_validity_period,
         );
 
-        // Rows are framed and compressed, so stdout is not an option.
-        let mut out =
-            FrameWriter::new(BufWriter::new(std::fs::File::create(&self.out)?), ROWS_PER_FRAME);
-        let mut chunk_out = FrameWriter::new(
-            BufWriter::new(std::fs::File::create(&self.chunk_out)?),
-            ROWS_PER_FRAME,
+        std::fs::create_dir_all(&self.out_dir)?;
+        let mut windows_done = 0;
+        let mut windows_skipped = 0;
+        let mut height = self.start_height;
+        while height <= self.end_height {
+            let window_end = (height + self.window_blocks - 1).min(self.end_height);
+            let marker = window_marker(&self.out_dir, height, window_end);
+            if self.resume && marker.exists() {
+                windows_skipped += 1;
+                height = window_end + 1;
+                continue;
+            }
+
+            // Rows are framed and compressed, so stdout is not an option.
+            let rows_path = self.out_dir.join(format!("{height}-{window_end}.rows"));
+            let chunks_path = self.out_dir.join(format!("{height}-{window_end}.chunks"));
+            let mut out = FrameWriter::new(
+                BufWriter::new(std::fs::File::create(&rows_path)?),
+                ROWS_PER_FRAME,
+            );
+            let mut chunk_out = FrameWriter::new(
+                BufWriter::new(std::fs::File::create(&chunks_path)?),
+                ROWS_PER_FRAME,
+            );
+            let (rows, checks, census) =
+                extract_range(&chain_store, height, window_end, &mut out, &mut chunk_out)?;
+            out.finish()?;
+            chunk_out.finish()?;
+
+            // Summaries land beside the rows, so a window stands alone and a
+            // run that stops keeps what it already paid for.
+            std::fs::write(
+                self.out_dir.join(format!("{height}-{window_end}.checks.json")),
+                serde_json::to_string_pretty(&checks)?,
+            )?;
+            std::fs::write(
+                self.out_dir.join(format!("{height}-{window_end}.census.json")),
+                serde_json::to_string_pretty(&census)?,
+            )?;
+            // Written last, so a window is only skipped once its files are whole.
+            std::fs::write(&marker, format!("{rows}\n"))?;
+            tracing::info!(
+                target: "receipt-gas-headroom",
+                window = format!("{height}-{window_end}"),
+                rows,
+                "window finished"
+            );
+            windows_done += 1;
+            height = window_end + 1;
+        }
+        tracing::info!(
+            target: "receipt-gas-headroom",
+            windows_done,
+            windows_skipped,
+            "extract finished"
         );
-        let (rows, checks, census) = extract_range(
-            &chain_store,
-            self.start_height,
-            self.end_height,
-            &mut out,
-            &mut chunk_out,
-        )?;
-        tracing::info!(target: "receipt-gas-headroom", rows, "extract finished");
-        eprintln!("{}", serde_json::to_string_pretty(&checks)?);
-        eprintln!("{}", serde_json::to_string_pretty(&census)?);
-        out.finish()?;
-        chunk_out.finish()?;
         Ok(())
     }
 }
