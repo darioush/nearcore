@@ -220,25 +220,15 @@ pub fn is_part_filename(s: &str) -> bool {
 }
 
 pub fn get_num_parts_from_filename(s: &str) -> Option<u64> {
-    if let Some(captures) = match_filename(s) {
-        if let Some(num_parts) = captures.get(2) {
-            if let Ok(num_parts) = num_parts.as_str().parse::<u64>() {
-                return Some(num_parts);
-            }
-        }
-    }
-    None
+    let captures = match_filename(s)?;
+    let num_parts = captures.get(2)?;
+    num_parts.as_str().parse::<u64>().ok()
 }
 
 pub fn get_part_idx_from_filename(s: &str) -> Option<StatePartIndex> {
-    if let Some(captures) = match_filename(s) {
-        if let Some(part_idx) = captures.get(1) {
-            if let Ok(part_idx) = part_idx.as_str().parse::<StatePartIndex>() {
-                return Some(part_idx);
-            }
-        }
-    }
-    None
+    let captures = match_filename(s)?;
+    let part_idx = captures.get(1)?;
+    part_idx.as_str().parse::<StatePartIndex>().ok()
 }
 
 /// Lists state parts from external storage and returns num_parts.
