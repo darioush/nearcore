@@ -1716,15 +1716,12 @@ impl messaging::Handler<IncomingFrame> for PeerActor {
                     //
                     // We have similar code to skip sending tombstones, here we handle the
                     // case when our peer doesn't use that logic yet.
-                    if let Some(skip_tombstones) = this.network_state.config.skip_tombstones {
-                        if let PeerMessage::SyncRoutingTable(routing_table) = &mut peer_msg {
-                            if conn.established_time + skip_tombstones > now {
-                                routing_table
-                                    .edges
-                                    .retain(|edge| edge.edge_type() == EdgeState::Active);
-                                metrics::EDGE_TOMBSTONE_RECEIVING_SKIPPED.inc();
-                            }
-                        }
+                    if let Some(skip_tombstones) = this.network_state.config.skip_tombstones
+                        && let PeerMessage::SyncRoutingTable(routing_table) = &mut peer_msg
+                        && conn.established_time + skip_tombstones > now
+                    {
+                        routing_table.edges.retain(|edge| edge.edge_type() == EdgeState::Active);
+                        metrics::EDGE_TOMBSTONE_RECEIVING_SKIPPED.inc();
                     }
                     // Handle the message.
                     this.handle_msg_ready(conn.clone(), peer_msg, recv_permit);
