@@ -244,10 +244,11 @@ impl super::NetworkState {
                 }
                 // Direct TIER1 connections have priority over proxy connections.
                 for key in &accounts_data.keys {
-                    if let Some(peer_id) = self.peers.tier1_peer_for_account(key) {
-                        if let Some((t1_peer_id, _)) = tier1.get_key_value(&peer_id) {
-                            safe.insert(key, t1_peer_id);
-                        }
+                    let Some(peer_id) = self.peers.tier1_peer_for_account(key) else {
+                        continue;
+                    };
+                    if let Some((t1_peer_id, _)) = tier1.get_key_value(&peer_id) {
+                        safe.insert(key, t1_peer_id);
                     }
                 }
             }
@@ -255,12 +256,14 @@ impl super::NetworkState {
             // (to act as a TIER1 proxy).
             None => {
                 for key in &accounts_data.keys {
-                    if let Some(peer_id) = self.peers.tier1_peer_for_account(key) {
-                        if let Some((t1_peer_id, s)) = tier1.get_key_value(&peer_id) {
-                            if s.peer_type == PeerType::Inbound {
-                                safe.insert(key, t1_peer_id);
-                            }
-                        }
+                    let Some(peer_id) = self.peers.tier1_peer_for_account(key) else {
+                        continue;
+                    };
+                    let Some((t1_peer_id, s)) = tier1.get_key_value(&peer_id) else {
+                        continue;
+                    };
+                    if s.peer_type == PeerType::Inbound {
+                        safe.insert(key, t1_peer_id);
                     }
                 }
             }
