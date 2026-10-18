@@ -47,12 +47,13 @@ impl RateLimits {
     /// Returns `true` if the message should be allowed to continue. Otherwise,
     /// if it should be rate limited, returns `false`.
     pub fn is_allowed(&mut self, message: &PeerMessage, now: Instant) -> bool {
-        if let Some((key, cost)) = get_key_and_token_cost(message) {
-            if let Some(bucket) = &mut self.buckets[key] {
-                return bucket.acquire(cost, now);
-            }
-        }
-        true
+        let Some((key, cost)) = get_key_and_token_cost(message) else {
+            return true;
+        };
+        let Some(bucket) = &mut self.buckets[key] else {
+            return true;
+        };
+        bucket.acquire(cost, now)
     }
 }
 
