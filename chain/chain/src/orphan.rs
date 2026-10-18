@@ -343,33 +343,32 @@ impl Chain {
             }
             // 4) Among the `NUM_ORPHAN_ANCESTORS_CHECK` immediate parents of the block at least one is
             //    accepted(is in store), call it `ancestor`
-            if self.get_block(&block_hash).is_ok() {
-                if let Ok(epoch_id) = self.epoch_manager.get_epoch_id_from_prev_block(&block_hash) {
-                    // 5) The next block of `ancestor` has the same epoch_id as the orphan block
-                    if &epoch_id == orphan.header().epoch_id() {
-                        // 6) The orphan has missing chunks
-                        if let Err(e) = self.ping_missing_chunks(block_hash, orphan) {
-                            return match e {
-                                Error::ChunksMissing(missing_chunks) => {
-                                    let missing_chunks_list = missing_chunks
-                                        .iter()
-                                        .map(|chunk| (chunk.shard_id(), chunk.chunk_hash()))
-                                        .collect::<Vec<_>>();
-                                    tracing::debug!(target: "chain", orphan_hash = ?orphan.hash(), ?missing_chunks_list, "request missing chunks for orphan");
-                                    Some(OrphanMissingChunks {
-                                        missing_chunks,
-                                        epoch_id,
-                                        ancestor_hash: block_hash,
-                                    })
-                                }
-                                _ => None,
-                            };
-                        }
-                    }
-                }
+            if self.get_block(&block_hash).is_err() {
                 return None;
             }
-            return None;
+            let Ok(epoch_id) = self.epoch_manager.get_epoch_id_from_prev_block(&block_hash) else {
+                return None;
+            };
+            // 5) The next block of `ancestor` has the same epoch_id as the orphan block
+            if &epoch_id != orphan.header().epoch_id() {
+                return None;
+            }
+            // 6) The orphan has missing chunks
+            let Err(Error::ChunksMissing(missing_chunks)) =
+                self.ping_missing_chunks(block_hash, orphan)
+            else {
+                return None;
+            };
+            let missing_chunks_list = missing_chunks
+                .iter()
+                .map(|chunk| (chunk.shard_id(), chunk.chunk_hash()))
+                .collect::<Vec<_>>();
+            tracing::debug!(target: "chain", orphan_hash = ?orphan.hash(), ?missing_chunks_list, "request missing chunks for orphan");
+            return Some(OrphanMissingChunks {
+                missing_chunks,
+                epoch_id,
+                ancestor_hash: block_hash,
+            });
         }
         None
     }
