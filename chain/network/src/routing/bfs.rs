@@ -62,12 +62,13 @@ impl Graph {
     }
 
     fn contains_edge(&self, peer0: &PeerId, peer1: &PeerId) -> bool {
-        if let Some(&id0) = self.p2id.get(peer0) {
-            if let Some(&id1) = self.p2id.get(peer1) {
-                return self.adjacency[id0 as usize].contains(&id1);
-            }
-        }
-        false
+        let Some(&id0) = self.p2id.get(peer0) else {
+            return false;
+        };
+        let Some(&id1) = self.p2id.get(peer1) else {
+            return false;
+        };
+        self.adjacency[id0 as usize].contains(&id1)
     }
 
     fn remove_if_unused(&mut self, id: u32) {
