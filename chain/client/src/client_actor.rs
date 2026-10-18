@@ -1391,14 +1391,13 @@ impl ClientActor {
         }
 
         // Check block height to trigger expected shutdown
-        if let Ok(head) = self.client.chain.head() {
-            if let Some(block_height_to_shutdown) = self.client.config.expected_shutdown.get() {
-                if head.height >= block_height_to_shutdown {
-                    tracing::info!(target: "client", head_height = head.height, ?block_height_to_shutdown, "expected shutdown triggered");
-                    if let Some(tx) = self.shutdown_signal.take() {
-                        let _ = tx.send(ShutdownReason::ExpectedShutdown);
-                    }
-                }
+        if let Ok(head) = self.client.chain.head()
+            && let Some(block_height_to_shutdown) = self.client.config.expected_shutdown.get()
+            && head.height >= block_height_to_shutdown
+        {
+            tracing::info!(target: "client", head_height = head.height, ?block_height_to_shutdown, "expected shutdown triggered");
+            if let Some(tx) = self.shutdown_signal.take() {
+                let _ = tx.send(ShutdownReason::ExpectedShutdown);
             }
         }
 
