@@ -1207,12 +1207,11 @@ impl ClientActor {
     #[allow(clippy::needless_pass_by_ref_mut)] // &mut self is needed with the sandbox feature
     fn post_block_production(&mut self) {
         #[cfg(feature = "sandbox")]
-        if let Some(target) = self.fastforward_target_height {
-            if let Ok(head) = self.client.chain.head() {
-                if head.height >= target {
-                    self.fastforward_target_height = None;
-                }
-            }
+        if let Some(target) = self.fastforward_target_height
+            && let Ok(head) = self.client.chain.head()
+            && head.height >= target
+        {
+            self.fastforward_target_height = None;
         }
     }
 
