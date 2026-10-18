@@ -649,18 +649,12 @@ impl Handler<SpanWrapped<BlockResponse>> for ClientActor {
                 was_requested,
                 Some(self.client.myself_sender.apply_chunks_done.clone()),
             );
-        } else {
-            match self.client.epoch_manager.get_epoch_id_from_prev_block(block.header().prev_hash())
-            {
-                Ok(epoch_id) => {
-                    if let Some(hashes) = blocks_at_height.get(&epoch_id) {
-                        if !hashes.contains(block.header().hash()) {
-                            tracing::warn!(target: "client", block_hash = ?block.header().hash(), block_height = block.header().height(), "rejecting un-requested block");
-                        }
-                    }
-                }
-                _ => {}
-            }
+        } else if let Ok(epoch_id) =
+            self.client.epoch_manager.get_epoch_id_from_prev_block(block.header().prev_hash())
+            && let Some(hashes) = blocks_at_height.get(&epoch_id)
+            && !hashes.contains(block.header().hash())
+        {
+            tracing::warn!(target: "client", block_hash = ?block.header().hash(), block_height = block.header().height(), "rejecting un-requested block");
         }
     }
 }
