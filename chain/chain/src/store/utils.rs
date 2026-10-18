@@ -281,12 +281,14 @@ fn find_common_header(
     hashes: &[CryptoHash],
 ) -> Option<Arc<BlockHeader>> {
     for hash in hashes {
-        if let Ok(header) = chain_store.get_block_header(hash) {
-            if let Ok(header_at_height) = chain_store.get_block_header_by_height(header.height()) {
-                if header.hash() == header_at_height.hash() {
-                    return Some(header);
-                }
-            }
+        let Ok(header) = chain_store.get_block_header(hash) else {
+            continue;
+        };
+        let Ok(header_at_height) = chain_store.get_block_header_by_height(header.height()) else {
+            continue;
+        };
+        if header.hash() == header_at_height.hash() {
+            return Some(header);
         }
     }
     None
