@@ -1590,25 +1590,13 @@ impl Chain {
     }
 
     fn determine_status(&self, head: Option<&Tip>, prev_head: &Tip) -> BlockStatus {
-        let has_head = head.is_some();
-        let mut is_next_block = false;
-
-        let old_hash = if let Some(head) = head {
-            if head.prev_block_hash == prev_head.last_block_hash {
-                is_next_block = true;
-                None
-            } else {
-                Some(prev_head.last_block_hash)
-            }
-        } else {
-            None
+        let Some(head) = head else {
+            return BlockStatus::Fork;
         };
-
-        match (has_head, is_next_block) {
-            (true, true) => BlockStatus::Next,
-            (true, false) => BlockStatus::Reorg(old_hash.unwrap()),
-            (false, _) => BlockStatus::Fork,
+        if head.prev_block_hash == prev_head.last_block_hash {
+            return BlockStatus::Next;
         }
+        BlockStatus::Reorg(prev_head.last_block_hash)
     }
 
     /// Set the new head after state sync was completed if it is indeed newer.
