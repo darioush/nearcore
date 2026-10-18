@@ -122,16 +122,18 @@ impl BlockProductionTracker {
     /// Record chunk collected after a block is produced if the block didn't include a chunk for the shard.
     /// If called before the block was produced, nothing happens.
     pub(crate) fn record_chunk_collected(&mut self, height: BlockHeight, shard_index: ShardIndex) {
-        if let Some(block_production) = self.0.get_mut(&height) {
-            let chunk_collections = &mut block_production.chunks_collection_time;
-            // Check that chunk_collection is set and we haven't received this chunk yet.
-            if let Some(chunk_collection) = chunk_collections.get_mut(shard_index) {
-                if chunk_collection.received_time.is_none() {
-                    chunk_collection.received_time = Some(Clock::real().now_utc());
-                }
-            }
+        let Some(block_production) = self.0.get_mut(&height) else {
+            return;
+        };
+        let chunk_collections = &mut block_production.chunks_collection_time;
+        // Check that chunk_collection is set and we haven't received this chunk yet.
+        let Some(chunk_collection) = chunk_collections.get_mut(shard_index) else {
             // Otherwise, it means chunk_collections is not set yet, which means the block wasn't produced.
             // And we do nothing in this case.
+            return;
+        };
+        if chunk_collection.received_time.is_none() {
+            chunk_collection.received_time = Some(Clock::real().now_utc());
         }
     }
 
