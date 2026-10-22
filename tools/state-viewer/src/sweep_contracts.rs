@@ -58,6 +58,10 @@ pub struct SweepContractsCmd {
     /// Seconds between two saves of the scan progress.
     #[clap(long, default_value = "5")]
     checkpoint_interval_secs: u64,
+    /// Stop the scan of each shard after this many accounts. For test runs:
+    /// the shard counts as done, so use a separate output directory.
+    #[clap(long)]
+    max_accounts_per_shard: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -91,7 +95,8 @@ impl SweepContractsCmd {
         let state = load_state(&dir).unwrap();
         let state = Mutex::new(state);
         let shard_layout = head_shard_layout(home_dir, &near_config, &store);
-        scan_shards(&store, &dir, &state, shard_layout.as_ref(), interval).unwrap();
+        let max_accounts = self.max_accounts_per_shard;
+        scan_shards(&store, &dir, &state, shard_layout.as_ref(), interval, max_accounts).unwrap();
         write_local_contracts(&store, &dir).unwrap();
         write_global_index(&dir).unwrap();
         eprintln!("sweep complete, results in {}", dir.display());
@@ -155,6 +160,7 @@ fn scan_shards(
     state: &Mutex<SweepState>,
     shard_layout: Option<&ShardLayout>,
     interval: Duration,
+    max_accounts: Option<u64>,
 ) -> anyhow::Result<()> {
     let shards = ready_shards(store)?;
     anyhow::ensure!(!shards.is_empty(), "no shard has ready flat storage");
@@ -183,7 +189,17 @@ fn scan_shards(
                 bar.set_prefix(shard_uid.to_string());
                 let range = shard_key_range(shard_layout, *shard_uid);
                 scope.spawn(move || {
-                    scan_shard(store, dir, state, *shard_uid, range, bar, multi, interval)
+                    scan_shard(
+                        store,
+                        dir,
+                        state,
+                        *shard_uid,
+                        range,
+                        bar,
+                        multi,
+                        interval,
+                        max_accounts,
+                    )
                 })
             })
             .collect();
@@ -259,6 +275,7 @@ fn scan_shard(
     bar: ProgressBar,
     multi: &MultiProgress,
     interval: Duration,
+    max_accounts: Option<u64>,
 ) -> anyhow::Result<()> {
     let shard_key = shard_uid.to_string();
     let mut progress = state.lock().shards[&shard_key].clone();
@@ -291,6 +308,9 @@ fn scan_shard(
         let mut last_checkpoint = Instant::now();
         let flat_store = store.flat_store();
         for (key, value) in flat_store.iter_range(shard_uid, Some(&from), Some(&to)) {
+            if max_accounts.is_some_and(|max| progress.accounts_scanned >= max) {
+                break;
+            }
             progress.accounts_scanned += 1;
             match parse_account(store, shard_uid, &key, value) {
                 Ok((account_id, account)) => {
