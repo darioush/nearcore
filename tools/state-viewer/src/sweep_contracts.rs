@@ -34,7 +34,7 @@ use nearcore::NearConfig;
 use parking_lot::Mutex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,11 @@ pub struct SweepContractsCmd {
     /// the shard counts as done, so use a separate output directory.
     #[clap(long)]
     max_accounts_per_shard: Option<u64>,
+    /// Stop after the account scan and print the number of unique contracts,
+    /// so the disk space for the download can be checked first. A rerun
+    /// without this flag continues with the download.
+    #[clap(long)]
+    mapping_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -96,7 +101,11 @@ impl SweepContractsCmd {
         let state = Mutex::new(state);
         let shard_layout = head_shard_layout(home_dir, &near_config, &store);
         let max_accounts = self.max_accounts_per_shard;
-        scan_shards(&store, &dir, &state, shard_layout.as_ref(), interval, max_accounts).unwrap();
+        scan_shards(&store, &dir, &state, &shard_layout, interval, max_accounts).unwrap();
+        if self.mapping_only {
+            print_mapping_summary(&dir).unwrap();
+            return;
+        }
         write_local_contracts(&store, &dir).unwrap();
         write_global_index(&dir).unwrap();
         eprintln!("sweep complete, results in {}", dir.display());
@@ -130,22 +139,24 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn head_shard_layout(
-    home_dir: &Path,
-    near_config: &NearConfig,
-    store: &Store,
-) -> Option<ShardLayout> {
+fn head_shard_layout(home_dir: &Path, near_config: &NearConfig, store: &Store) -> ShardLayout {
     let epoch_manager =
         EpochManager::new_arc_handle(store.clone(), &near_config.genesis.config, Some(home_dir));
-    let head = store.chain_store().head().ok()?;
-    epoch_manager.get_shard_layout(&head.epoch_id).ok()
+    let head = store.chain_store().head().expect("read chain head");
+    epoch_manager.get_shard_layout(&head.epoch_id).expect("read shard layout at chain head")
 }
 
-/// Returns the shards with ready flat storage and their flat head heights.
-fn ready_shards(store: &Store) -> anyhow::Result<Vec<(ShardUId, u64)>> {
+/// Returns the shards of the head shard layout with ready flat storage, and
+/// their flat head heights. The database can hold flat storage of shards from
+/// old layouts, with stale state.
+fn ready_shards(store: &Store, shard_layout: &ShardLayout) -> anyhow::Result<Vec<(ShardUId, u64)>> {
     let mut shards = vec![];
     for (key, value) in store.iter(DBCol::FlatStorageStatus) {
         let shard_uid = ShardUId::try_from(key.as_ref()).map_err(|err| anyhow::anyhow!("{err}"))?;
+        if !shard_layout.shard_uids().any(|uid| uid == shard_uid) {
+            eprintln!("skip shard {shard_uid}: not in the shard layout at chain head");
+            continue;
+        }
         match FlatStorageStatus::try_from_slice(&value)? {
             FlatStorageStatus::Ready(ready) => shards.push((shard_uid, ready.flat_head.height)),
             status => eprintln!("skip shard {shard_uid}: flat storage status {status:?}"),
@@ -158,12 +169,16 @@ fn scan_shards(
     store: &Store,
     dir: &Path,
     state: &Mutex<SweepState>,
-    shard_layout: Option<&ShardLayout>,
+    shard_layout: &ShardLayout,
     interval: Duration,
     max_accounts: Option<u64>,
 ) -> anyhow::Result<()> {
-    let shards = ready_shards(store)?;
-    anyhow::ensure!(!shards.is_empty(), "no shard has ready flat storage");
+    let shards = ready_shards(store, shard_layout)?;
+    let missing: Vec<_> = shard_layout
+        .shard_uids()
+        .filter(|uid| !shards.iter().any(|(shard_uid, _)| shard_uid == uid))
+        .collect();
+    anyhow::ensure!(missing.is_empty(), "shards without ready flat storage: {missing:?}");
     {
         let mut state = state.lock();
         for (shard_uid, height) in &shards {
@@ -212,11 +227,10 @@ fn scan_shards(
 
 /// Returns the account key range of the shard as positions on a `u64` line.
 /// The progress bar uses it to estimate how much of the shard is scanned.
-fn shard_key_range(shard_layout: Option<&ShardLayout>, shard_uid: ShardUId) -> (u64, u64) {
+fn shard_key_range(shard_layout: &ShardLayout, shard_uid: ShardUId) -> (u64, u64) {
     let full = (key_position(b"0"), key_position(b"{"));
-    let Some(layout) = shard_layout else { return full };
-    let Ok(index) = layout.get_shard_index(shard_uid.shard_id()) else { return full };
-    let boundaries = layout.boundary_accounts();
+    let Ok(index) = shard_layout.get_shard_index(shard_uid.shard_id()) else { return full };
+    let boundaries = shard_layout.boundary_accounts();
     let lower = match index {
         0 => full.0,
         _ => boundaries.get(index - 1).map_or(full.0, |b| key_position(b.as_bytes())),
@@ -543,6 +557,21 @@ fn fetch_local_code(
     let code = store.trie_store().get(shard_uid, hash)?.to_vec();
     anyhow::ensure!(CryptoHash::hash_bytes(&code) == *hash, "code hash mismatch");
     Ok(code)
+}
+
+fn print_mapping_summary(dir: &Path) -> anyhow::Result<()> {
+    let mut local_hashes = BTreeSet::new();
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for (_, _, kind, id) in read_mapping(dir)? {
+        *counts.entry(kind.clone()).or_default() += 1;
+        if kind == "local" {
+            local_hashes.insert(id);
+        }
+    }
+    eprintln!("mapping complete: contract accounts by kind {counts:?}");
+    eprintln!("unique local contracts to download: {}", local_hashes.len());
+    eprintln!("rerun without --mapping-only to download them");
+    Ok(())
 }
 
 /// Writes `global_contracts/index.tsv` with the number of accounts that use
