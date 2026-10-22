@@ -4,6 +4,7 @@ use crate::contract_accounts::ContractAccountFilter;
 use crate::latest_witnesses::StateWitnessCmd;
 use crate::replay_headers::replay_headers;
 use crate::rocksdb_stats::get_rocksdb_stats;
+use crate::sweep_contracts::SweepContractsCmd;
 use crate::trie_iteration_benchmark::TrieIterationBenchmarkCmd;
 use near_chain::types::RuntimeStorageConfig;
 use near_chain_configs::{GenesisChangeConfig, GenesisValidationMode};
@@ -106,6 +107,9 @@ pub enum StateViewerSubCommand {
     /// Iterates over the Flat State and prints some statistics.
     /// e.g. large accounts, total, average and median size, middle account
     StateStats(StateStatsCmd),
+    /// Write every deployed contract to a directory of wasm files, with the
+    /// account to contract mapping. Saves progress and resumes on rerun.
+    SweepContracts(SweepContractsCmd),
     /// Benchmark how long does it take to iterate the trie.
     TrieIterationBenchmark(TrieIterationBenchmarkCmd),
     /// View head of the storage.
@@ -198,6 +202,7 @@ impl StateViewerSubCommand {
             StateViewerSubCommand::ViewChain(cmd) => cmd.run(home_dir, near_config, store),
             StateViewerSubCommand::ViewGenesis(cmd) => cmd.run(home_dir, near_config, store),
             StateViewerSubCommand::ViewTrie(cmd) => cmd.run(store),
+            StateViewerSubCommand::SweepContracts(cmd) => cmd.run(home_dir, near_config, store),
             StateViewerSubCommand::TrieIterationBenchmark(cmd) => cmd.run(near_config, store),
             StateViewerSubCommand::StateWitness(cmd) => cmd.run(home_dir, near_config, store),
             StateViewerSubCommand::CongestionControl(cmd) => cmd.run(home_dir, near_config, store),

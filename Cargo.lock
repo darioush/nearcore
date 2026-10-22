@@ -7491,6 +7491,7 @@ dependencies = [
  "bytesize 1.1.0",
  "chrono",
  "clap",
+ "hex",
  "indicatif",
  "insta",
  "itertools 0.14.0",
