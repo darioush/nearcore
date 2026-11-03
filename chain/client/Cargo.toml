@@ -64,6 +64,7 @@ assert_matches.workspace = true
 near-primitives = { workspace = true, features = ["clock", "solomon", "rand"] }
 criterion.workspace = true
 testlib.workspace = true
+stateright.workspace = true
 
 [[bench]]
 name = "generate_state_witness_parts"

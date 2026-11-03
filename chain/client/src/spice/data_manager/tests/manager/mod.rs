@@ -21,8 +21,10 @@ use near_store::adapter::StoreAdapter;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod batching;
+mod compressed;
 mod delivery;
 mod lifecycle;
+mod model;
 mod orphans;
 mod recovery;
 mod retries;
